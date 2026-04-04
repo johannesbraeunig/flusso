@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Flusso — MoneyMoney → YNAB Sync CLI
+# https://github.com/johannesbraeunig/flusso
+
+VERSION="0.0.1"
+
+# Clean up temp files on exit
+trap 'rm -f /tmp/flusso_*.tmp 2>/dev/null' EXIT
+
+FLUSSO_DIR="$HOME/.flusso"
+CONFIG_FILE="$FLUSSO_DIR/config.json"
+YNAB_BASE="https://api.ynab.com/v1"
+
+# ── Helpers ──────────────────────────────────────────────────
+
+# Respect NO_COLOR (https://no-color.org) and non-TTY output
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  bold()  { printf '\033[1m%s\033[0m' "$1"; }
+  green() { printf '\033[32m%s\033[0m' "$1"; }
+  red()   { printf '\033[31m%s\033[0m' "$1"; }
+  dim()   { printf '\033[2m%s\033[0m' "$1"; }
+else
+  bold()  { printf '%s' "$1"; }
+  green() { printf '%s' "$1"; }
+  red()   { printf '%s' "$1"; }
+  dim()   { printf '%s' "$1"; }
+fi
+
+header() {
+  echo ""
+  echo "$(bold "── $1 ──")"
+  echo ""
+}
+
+die() {
+  echo "$(red "Error:") $1" >&2
+  exit 1
+}
+
+validate_account_id() {
+  [ -n "$1" ] || die "Account identifier is empty."
+  # Only allow alphanumeric, spaces, and * (masked credit card numbers)
+  [[ "$1" =~ ^[A-Za-z0-9*\ ]+$ ]] || die "Invalid account identifier: $1"
+}
+
+validate_date() {
+  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "Invalid date format: $1 (expected YYYY-MM-DD)"
+}
+
+check_deps() {
+  for cmd in "$@"; do
+    if ! command -v "$cmd" &>/dev/null; then
+      die "$cmd is not installed."
+    fi
+  done
+}
+
+# ── Config ───────────────────────────────────────────────────
+
+load_config() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    die "Config not found at $CONFIG_FILE. Run 'flusso setup' first."
+  fi
+  API_TOKEN=$(jq -r '.api_token' "$CONFIG_FILE")
+  BUDGET_ID=$(jq -r '.budget_id' "$CONFIG_FILE")
+  GLOBAL_START_DATE=$(jq -r '.start_date // empty' "$CONFIG_FILE")
+  SYNC_CATEGORY_UUID=$(jq -r '.sync_category.uuid // empty' "$CONFIG_FILE")
+  SYNC_CATEGORY_NAME=$(jq -r '.sync_category.name // empty' "$CONFIG_FILE")
+  if [ -z "$SYNC_CATEGORY_UUID" ]; then
+    die "sync_category is missing in config. Run 'flusso setup' again."
+  fi
+}
+
+# ── YNAB API ─────────────────────────────────────────────────
+
+ynab_get() {
+  curl -sf \
+    -H "Authorization: Bearer $API_TOKEN" \
+    "$YNAB_BASE$1"
+}
+
+ynab_post() {
+  local path="$1" body="$2"
+  # Body via temp file to avoid ARG_MAX and process list exposure
+  local tmpfile
+  tmpfile=$(mktemp /tmp/flusso_XXXXXX.tmp)
+  printf '%s' "$body" > "$tmpfile"
+  curl -sf -X POST "$YNAB_BASE$path" \
+    -H "Authorization: Bearer $API_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d @"$tmpfile"
+  local rc=$?
+  rm -f "$tmpfile"
+  return $rc
+}
+
+# ════════════════════════════════════════════════════════════
+# COMMANDS
+# ════════════════════════════════════════════════════════════
+
+# ── setup ────────────────────────────────────────────────────
+
+cmd_setup() {
+  check_deps curl jq
+
+  echo ""
+  echo "$(bold "Flusso Setup")"
+  echo "$(dim "MoneyMoney → YNAB Sync Configuration")"
+
+  # Directories
+  header "1/6 Directories"
+  mkdir -p "$FLUSSO_DIR"
+  chmod 700 "$FLUSSO_DIR"
+  echo "$(green "✓") Created $FLUSSO_DIR"
+
+  # YNAB Token
+  header "2/6 YNAB API Token"
+  echo "Create your token at: https://app.ynab.com/settings/developer"
+  echo ""
+  read -rp "YNAB API Token: " API_TOKEN
+  [ -z "$API_TOKEN" ] && die "No token provided."
+
+  echo ""
+  echo "Validating token..."
+  ynab_get "/user" >/dev/null || die "Invalid token or YNAB API unreachable."
+  echo "$(green "✓") Token valid"
+
+  # Budget
+  header "3/6 Select YNAB Budget"
+  local budgets_json budget_count
+  budgets_json=$(ynab_get "/budgets")
+  budget_count=$(echo "$budgets_json" | jq '.data.budgets | length')
+  [ "$budget_count" -eq 0 ] && die "No budgets found."
+
+  echo "Available budgets:"
+  echo ""
+  for i in $(seq 0 $((budget_count - 1))); do
+    local name
+    name=$(echo "$budgets_json" | jq -r ".data.budgets[$i].name")
+    printf "  %s  %s\n" "$(bold "[$((i + 1))]")" "$name"
+  done
+
+  echo ""
+  read -rp "Select budget [1-$budget_count]: " budget_choice
+  [[ "$budget_choice" =~ ^[0-9]+$ ]] || die "Please enter a number."
+  local budget_idx=$((budget_choice - 1))
+  [ "$budget_idx" -lt 0 ] || [ "$budget_idx" -ge "$budget_count" ] && die "Invalid selection."
+
+  BUDGET_ID=$(echo "$budgets_json" | jq -r ".data.budgets[$budget_idx].id")
+  local budget_name
+  budget_name=$(echo "$budgets_json" | jq -r ".data.budgets[$budget_idx].name")
+  echo "$(green "✓") Budget: $budget_name"
+
+  # Start date
+  header "4/6 Start Date"
+  local today
+  today=$(date +%Y-%m-%d)
+  echo "From which date should transactions be synced?"
+  read -rp "Start date [$today]: " START_DATE
+  START_DATE="${START_DATE:-$today}"
+  validate_date "$START_DATE"
+  echo "$(green "✓") Start date: $START_DATE"
+
+  # Map accounts
+  header "5/6 Map Accounts"
+  echo "Map your MoneyMoney accounts to the corresponding YNAB accounts."
+  echo "For each mapping, enter the MoneyMoney account details first,"
+  echo "then select which YNAB account it should sync to."
+  echo ""
+  local accounts_json ynab_account_count
+  accounts_json=$(ynab_get "/budgets/$BUDGET_ID/accounts")
+  ynab_account_count=$(echo "$accounts_json" | jq '[.data.accounts[] | select(.closed == false)] | length')
+  [ "$ynab_account_count" -eq 0 ] && die "No open accounts in this budget."
+
+  local ACCOUNTS_JSON="["
+  local first_account=true
+  local mapping_num=1
+
+  while true; do
+    echo "$(bold "Account mapping #$mapping_num")"
+    echo ""
+
+    # 1. MoneyMoney details
+    local mm_name mm_account acct_start
+    read -rp "MoneyMoney account name: " mm_name
+    read -rp "MoneyMoney account number (IBAN or card number): " mm_account
+    read -rp "Custom start date? (empty = global) [$START_DATE]: " acct_start
+
+    # 2. Pick YNAB account
+    echo ""
+    echo "YNAB accounts in $(bold "$budget_name"):"
+    echo ""
+    for i in $(seq 0 $((ynab_account_count - 1))); do
+      local acct_name balance balance_fmt
+      acct_name=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$i].name")
+      balance=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$i].balance")
+      balance_fmt=$(env LC_NUMERIC=C printf "%.2f" "$(echo "scale=2; $balance / 1000" | bc)")
+      printf "  %s  %-30s %s\n" "$(bold "[$((i + 1))]")" "$acct_name" "$(dim "$balance_fmt €")"
+    done
+
+    echo ""
+    local acct_choice
+    read -rp "Sync to YNAB account [1-$ynab_account_count]: " acct_choice
+
+    local acct_idx=$((acct_choice - 1))
+    if [ "$acct_idx" -lt 0 ] || [ "$acct_idx" -ge "$ynab_account_count" ]; then
+      echo "$(red "Error:") Invalid selection, skipping."
+      echo ""
+      continue
+    fi
+
+    local ynab_acct_id ynab_acct_name
+    ynab_acct_id=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$acct_idx].id")
+    ynab_acct_name=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$acct_idx].name")
+
+    local acct_obj
+    acct_obj=$(jq -n \
+      --arg name "$mm_name" \
+      --arg acct "$mm_account" \
+      --arg ynab_id "$ynab_acct_id" \
+      '{name: $name, moneymoney_account: $acct, ynab_account_id: $ynab_id}')
+
+    if [ -n "$acct_start" ]; then
+      acct_obj=$(echo "$acct_obj" | jq --arg sd "$acct_start" '. + {start_date: $sd}')
+    fi
+
+    if [ "$first_account" = true ]; then
+      first_account=false
+    else
+      ACCOUNTS_JSON+=","
+    fi
+    ACCOUNTS_JSON+="$acct_obj"
+
+    echo ""
+    echo "$(green "✓") $mm_name ($mm_account) → $ynab_acct_name"
+    echo ""
+    mapping_num=$((mapping_num + 1))
+    read -rp "Add another account? [y/N]: " add_more
+    case "$add_more" in
+      y|Y|yes|Yes) echo ""; continue ;;
+      *) break ;;
+    esac
+  done
+
+  ACCOUNTS_JSON+="]"
+
+  # Sync category
+  header "6/6 MoneyMoney Category"
+  echo "After syncing, Flusso assigns a category to transactions in MoneyMoney."
+  echo "This marks them as synced and prevents duplicate syncs."
+  echo ""
+
+  # Fetch categories from MoneyMoney
+  local categories_plist categories_json category_count
+  if ! categories_plist=$(osascript -e 'tell application "MoneyMoney" to export categories' 2>&1); then
+    die "Could not fetch categories from MoneyMoney."
+  fi
+  categories_json=$(echo "$categories_plist" | perl -0777 -pe 's|<data>\s*[^<]*</data>|<string>ICON</string>|gs' | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' | plutil -convert json -o - -)
+  category_count=$(echo "$categories_json" | jq '[.[] | select(.group == false)] | length')
+
+  echo "Available categories:"
+  echo ""
+  for i in $(seq 0 $((category_count - 1))); do
+    local cat_name
+    cat_name=$(echo "$categories_json" | jq -r "[.[] | select(.group == false)][$i].name")
+    printf "  %s  %s\n" "$(bold "[$((i + 1))]")" "$cat_name"
+  done
+
+  echo ""
+  read -rp "Select sync category [1-$category_count]: " cat_choice
+  [[ "$cat_choice" =~ ^[0-9]+$ ]] || die "Please enter a number."
+  local cat_idx=$((cat_choice - 1))
+  [ "$cat_idx" -lt 0 ] || [ "$cat_idx" -ge "$category_count" ] && die "Invalid selection."
+
+  local SYNC_CATEGORY_UUID SYNC_CATEGORY_NAME
+  SYNC_CATEGORY_UUID=$(echo "$categories_json" | jq -r "[.[] | select(.group == false)][$cat_idx].uuid")
+  SYNC_CATEGORY_NAME=$(echo "$categories_json" | jq -r "[.[] | select(.group == false)][$cat_idx].name")
+  echo "$(green "✓") Category: $SYNC_CATEGORY_NAME"
+
+  # Write config
+  header "Save Configuration"
+  local config
+  config=$(jq -n \
+    --arg token "$API_TOKEN" \
+    --arg budget "$BUDGET_ID" \
+    --arg start "$START_DATE" \
+    --arg cat_uuid "$SYNC_CATEGORY_UUID" \
+    --arg cat_name "$SYNC_CATEGORY_NAME" \
+    --argjson accounts "$ACCOUNTS_JSON" \
+    '{api_token: $token, budget_id: $budget, start_date: $start, sync_category: {uuid: $cat_uuid, name: $cat_name}, accounts: $accounts}')
+
+  (umask 077 && echo "$config" > "$CONFIG_FILE")
+  echo "$(green "✓") Config written: $CONFIG_FILE"
+
+  echo ""
+  echo "$(bold "$(green "✓ Flusso is ready!")")"
+  echo ""
+  echo "Next step: run $(bold "flusso sync") to sync your transactions."
+  echo ""
+}
+
+# ── sync ─────────────────────────────────────────────────────
+
+cmd_sync() {
+  check_deps curl jq osascript plutil
+  load_config
+
+  local dry_run=false
+  local filter_account=""
+
+  # Parse flags
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry_run=true; shift ;;
+      --account) [ -z "${2:-}" ] && die "--account requires a name"; filter_account="$2"; shift 2 ;;
+      *) die "Unknown flag: $1" ;;
+    esac
+  done
+
+  if [ "$dry_run" = true ]; then
+    echo "$(dim "[dry run] No transactions will be sent to YNAB.")"
+    echo ""
+  fi
+
+  local account_count
+  account_count=$(jq '.accounts | length' "$CONFIG_FILE")
+  [ "$account_count" -eq 0 ] && die "No accounts configured. Run 'flusso setup' first."
+
+  local total_synced=0
+  local total_skipped=0
+
+  for i in $(seq 0 $((account_count - 1))); do
+    local name mm_acct ynab_account_id account_start_date start_date
+    name=$(jq -r ".accounts[$i].name" "$CONFIG_FILE")
+    mm_acct=$(jq -r ".accounts[$i].moneymoney_account" "$CONFIG_FILE")
+    ynab_account_id=$(jq -r ".accounts[$i].ynab_account_id" "$CONFIG_FILE")
+    account_start_date=$(jq -r ".accounts[$i].start_date // empty" "$CONFIG_FILE")
+    start_date="${account_start_date:-$GLOBAL_START_DATE}"
+
+    # Filter by account name if specified
+    if [ -n "$filter_account" ] && [ "$filter_account" != "$name" ]; then
+      continue
+    fi
+
+    echo "$(bold "── $name ──") $(dim "($mm_acct)")"
+
+    # Validate inputs before passing to AppleScript
+    validate_account_id "$mm_acct"
+    validate_date "$start_date"
+
+    # Export transactions from MoneyMoney via AppleScript
+    local plist_data
+    if ! plist_data=$(osascript \
+      -e "on run {acctIBAN, startDt}" \
+      -e "  tell application \"MoneyMoney\"" \
+      -e "    export transactions from account acctIBAN from date startDt as \"plist\"" \
+      -e "  end tell" \
+      -e "end run" \
+      -- "$mm_acct" "$start_date" 2>&1); then
+      echo "$(red "Error:") Could not export from MoneyMoney."
+      echo "$(dim "Make sure MoneyMoney is running and has granted automation access.")"
+      echo "$(dim "$plist_data")"
+      echo ""
+      continue
+    fi
+
+    # Convert plist to JSON (sed converts <date> to <string> — plutil can't handle date types)
+    local transactions_json
+    if ! transactions_json=$(echo "$plist_data" | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' | plutil -convert json -o - - 2>&1); then
+      echo "$(red "Error:") Could not parse plist data."
+      echo "$(dim "$transactions_json")"
+      echo ""
+      continue
+    fi
+
+    # Filter: only booked transactions not yet assigned the sync category
+    local filtered
+    filtered=$(echo "$transactions_json" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
+      (.transactions // .)
+      | if type == "array" then . else [.] end
+      | map(select(
+          .booked == true
+          and (.categoryUuid != $cat_uuid)
+      ))
+    ')
+
+    local tx_count
+    tx_count=$(echo "$filtered" | jq 'length')
+
+    if [ "$tx_count" -eq 0 ]; then
+      echo "$(green "✓") No new transactions."
+      echo ""
+      continue
+    fi
+
+    echo "$tx_count new transaction(s) found."
+
+    if [ "$dry_run" = true ]; then
+      echo ""
+      printf "  $(dim "%-12s %-10s %-28s %s")\n" "DATE" "AMOUNT" "PAYEE" "MEMO"
+      printf "  $(dim "%-12s %-10s %-28s %s")\n" "----------" "----------" "----------------------------" "----------------------------"
+      echo "$filtered" | jq -r '.[] | "\(.bookingDate[:10] // .bookingDate)\t\(.amount * 100 | round / 100)\t\(.name // "Unknown")\t\(.purpose // "")"' | while IFS=$'\t' read -r date amount payee memo; do
+        env LC_NUMERIC=C printf "  %-12s %-10.2f %-28s %s\n" "$date" "$amount" "${payee:0:28}" "${memo:0:40}"
+      done
+      echo ""
+      total_skipped=$((total_skipped + tx_count))
+      continue
+    fi
+
+    # Build YNAB payload
+    local payload
+    payload=$(echo "$filtered" | jq --arg acct "$ynab_account_id" '{
+      transactions: [.[] | {
+        account_id: $acct,
+        date: (.bookingDate[:10] // .bookingDate),
+        amount: ((.amount * 1000) | round),
+        payee_name: (.name // "Unknown"),
+        memo: (.purpose // ""),
+        cleared: "cleared",
+        import_id: ("tx_" + (.id | tostring))
+      }]
+    }')
+
+    # POST to YNAB
+    local response
+    if ! response=$(ynab_post "/budgets/$BUDGET_ID/transactions" "$payload" 2>&1); then
+      echo "$(red "Error:") YNAB API request failed."
+      echo "$(dim "$response")"
+      echo ""
+      continue
+    fi
+
+    local created duplicates
+    created=$(echo "$response" | jq '.data.transaction_ids // [] | length')
+    duplicates=$(echo "$response" | jq '.data.duplicate_import_ids // [] | length')
+
+    echo "$(green "✓") $created created, $duplicates duplicates skipped."
+    total_synced=$((total_synced + created))
+
+    # Categorize synced transactions in MoneyMoney
+    local tx_ids
+    tx_ids=$(echo "$filtered" | jq -r '.[].id')
+    local labeled=0
+
+    for tx_id in $tx_ids; do
+      if osascript \
+        -e "on run {txId, catUUID}" \
+        -e "  tell application \"MoneyMoney\"" \
+        -e "    set transaction id (txId as integer) category to catUUID" \
+        -e "  end tell" \
+        -e "end run" \
+        -- "$tx_id" "$SYNC_CATEGORY_UUID" &>/dev/null; then
+        labeled=$((labeled + 1))
+      fi
+    done
+
+    echo "$(green "✓") $labeled transaction(s) categorized as \"$SYNC_CATEGORY_NAME\"."
+    echo ""
+  done
+
+  if [ "$dry_run" = true ]; then
+    echo "$(bold "Dry run complete.") $total_skipped transaction(s) would be synced."
+  else
+    echo "$(bold "$(green "✓ Sync complete.")") $total_synced transaction(s) synced."
+  fi
+}
+
+# ── status ───────────────────────────────────────────────────
+
+cmd_status() {
+  check_deps jq osascript plutil
+  load_config
+
+  echo ""
+  echo "$(bold "Flusso Status")"
+  echo ""
+
+  local account_count
+  account_count=$(jq '.accounts | length' "$CONFIG_FILE")
+
+  if [ "$account_count" -eq 0 ]; then
+    echo "No accounts configured. Run 'flusso setup' first."
+    return
+  fi
+
+  for i in $(seq 0 $((account_count - 1))); do
+    local name mm_acct account_start start_date
+    name=$(jq -r ".accounts[$i].name" "$CONFIG_FILE")
+    mm_acct=$(jq -r ".accounts[$i].moneymoney_account" "$CONFIG_FILE")
+    account_start=$(jq -r ".accounts[$i].start_date // empty" "$CONFIG_FILE")
+    start_date="${account_start:-$GLOBAL_START_DATE}"
+
+    # Count synced transactions by checking labels in MoneyMoney
+    local synced_count=0 total_count=0
+    if plist_data=$(osascript \
+      -e "on run {acctIBAN, startDt}" \
+      -e "  tell application \"MoneyMoney\"" \
+      -e "    export transactions from account acctIBAN from date startDt as \"plist\"" \
+      -e "  end tell" \
+      -e "end run" \
+      -- "$mm_acct" "$start_date" 2>/dev/null); then
+
+      local json_data
+      if json_data=$(echo "$plist_data" | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' | plutil -convert json -o - - 2>/dev/null); then
+        total_count=$(echo "$json_data" | jq '
+          (.transactions // .) | if type == "array" then . else [.] end
+          | map(select(.booked == true)) | length
+        ')
+        synced_count=$(echo "$json_data" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
+          (.transactions // .) | if type == "array" then . else [.] end
+          | map(select(.booked == true and .categoryUuid == $cat_uuid)) | length
+        ')
+      fi
+    fi
+
+    local pending=$((total_count - synced_count))
+    printf "  %-25s %s synced, %s pending  %s\n" \
+      "$(bold "$name")" \
+      "$(green "$synced_count")" \
+      "$pending" \
+      "$(dim "since $start_date")"
+  done
+
+  echo ""
+}
+
+# ── help ─────────────────────────────────────────────────────
+
+cmd_help() {
+  cat <<EOF
+$(bold "flusso") v$VERSION — MoneyMoney → YNAB Sync
+
+$(bold "Usage:")
+  flusso <command> [options]
+
+$(bold "Commands:")
+  setup             Interactive configuration wizard
+  sync              Sync transactions from MoneyMoney to YNAB
+  status            Show sync state for all accounts
+
+$(bold "Sync Options:")
+  --dry-run         Show what would be synced without sending
+  --account <name>  Sync only the named account
+
+$(bold "Examples:")
+  flusso setup                  # First-time configuration
+  flusso sync                   # Sync all accounts
+  flusso sync --dry-run         # Preview without syncing
+  flusso sync --account "Name"  # Sync one account
+
+$(bold "Configuration:")
+  Config: ~/.flusso/config.json
+
+EOF
+}
+
+# ── Dispatch ─────────────────────────────────────────────────
+
+case "${1:-}" in
+  setup)     shift; cmd_setup "$@" ;;
+  sync)      shift; cmd_sync "$@" ;;
+  status)    shift; cmd_status "$@" ;;
+  --version|-v) echo "flusso $VERSION" ;;
+  --help|-h|"") cmd_help ;;
+  *)         echo "Unknown command: $1"; echo ""; cmd_help; exit 1 ;;
+esac

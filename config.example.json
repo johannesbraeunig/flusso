@@ -1,0 +1,22 @@
+{
+  "api_token": "YOUR_YNAB_API_TOKEN",
+  "budget_id": "YOUR_YNAB_BUDGET_ID",
+  "start_date": "2026-04-01",
+  "sync_category": {
+    "uuid": "YOUR_MONEYMONEY_CATEGORY_UUID",
+    "name": "YNAB Synced"
+  },
+  "accounts": [
+    {
+      "name": "Checking Account",
+      "moneymoney_account": "DE00000000000000000000",
+      "ynab_account_id": "YNAB_ACCOUNT_ID_1"
+    },
+    {
+      "name": "Credit Card",
+      "moneymoney_account": "1234********5678",
+      "ynab_account_id": "YNAB_ACCOUNT_ID_2",
+      "start_date": "2026-03-01"
+    }
+  ]
+}
