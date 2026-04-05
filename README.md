@@ -134,6 +134,139 @@ Config is stored at `~/.flusso/config.json`:
 | `accounts[].ynab_account_id` | Corresponding YNAB account ID (selected during setup) |
 | `accounts[].start_date` | Optional per-account override for the global start date |
 
+## Example
+
+### Setup
+
+```
+$ flusso setup
+
+Flusso Setup
+MoneyMoney → YNAB Sync Configuration
+
+── 1/6 Directories ──
+
+✓ Created /Users/you/.flusso
+
+── 2/6 YNAB API Token ──
+
+Create your token at: https://app.ynab.com/settings/developer
+
+YNAB API Token: your-token-here
+
+Validating token...
+✓ Token valid
+
+── 3/6 Select YNAB Budget ──
+
+Available budgets:
+
+  [1]  My Budget
+  [2]  Shared Budget
+
+Select budget [1-2]: 1
+✓ Budget: My Budget
+
+── 4/6 Start Date ──
+
+From which date should transactions be synced?
+Start date [2026-04-05]: 2026-04-01
+✓ Start date: 2026-04-01
+
+── 5/6 Map Accounts ──
+
+Map your MoneyMoney accounts to the corresponding YNAB accounts.
+For each mapping, enter the MoneyMoney account details first,
+then select which YNAB account it should sync to.
+
+Account mapping #1
+
+MoneyMoney account name: Checking Account
+MoneyMoney account number (IBAN or card number): DE00000000000000000000
+Custom start date? (empty = global) [2026-04-01]:
+
+YNAB accounts in My Budget:
+
+  [1]  Checking                        1250.00 €
+  [2]  Credit Card                     -367.85 €
+
+Sync to YNAB account [1-2]: 1
+
+✓ Checking Account (DE00000000000000000000) → Checking
+
+Add another account? [y/N]: n
+
+── 6/6 MoneyMoney Category ──
+
+After syncing, Flusso assigns a category to transactions in MoneyMoney.
+This marks them as synced and prevents duplicate syncs.
+
+Available categories:
+
+  [1]  Uncategorized
+  [2]  ✔ YNAB Synced
+
+Select sync category [1-2]: 2
+✓ Category: ✔ YNAB Synced
+
+── Save Configuration ──
+
+✓ Config written: /Users/you/.flusso/config.json
+
+✓ Flusso is ready!
+
+Next step: run flusso sync to sync your transactions.
+```
+
+### Dry Run
+
+Preview what would be synced without sending anything:
+
+```
+$ flusso sync --dry-run
+
+[dry run] No transactions will be sent to YNAB.
+
+── Checking Account ── (DE00000000000000000000)
+5 new transaction(s) found.
+
+  DATE         AMOUNT     PAYEE                        MEMO
+  ----------   ---------- ---------------------------- ----------------------------
+  2026-04-03   -42.50     Supermarket GmbH             Groceries
+  2026-04-02   -9.99      Streaming Service            Monthly subscription
+  2026-04-01   -850.00    Landlord                     Rent April 2026
+  2026-04-01   -29.99     Phone Provider               Mobile plan
+  2026-04-01   3500.00    Employer Inc                 Salary April
+
+Dry run complete. 5 transaction(s) would be synced.
+```
+
+### Sync
+
+Run the actual sync:
+
+```
+$ flusso sync
+
+── Checking Account ── (DE00000000000000000000)
+5 new transaction(s) found.
+✓ 5 created, 0 duplicates skipped.
+✓ 5 transaction(s) categorized as "✔ YNAB Synced".
+
+✓ Sync complete. 5 transaction(s) synced.
+```
+
+Running again immediately shows no new transactions:
+
+```
+$ flusso sync
+
+── Checking Account ── (DE00000000000000000000)
+✓ No new transactions.
+
+✓ Sync complete. 0 transaction(s) synced.
+```
+
 ## How It Works
 
 ```
