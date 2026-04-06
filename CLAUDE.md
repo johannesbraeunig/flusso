@@ -9,7 +9,6 @@ Flusso — a macOS CLI tool that syncs MoneyMoney transactions to YNAB.
 ### Architecture
 
 - **`flusso`** — single bash script CLI with subcommands: `setup`, `sync`, `status`
-- **`Flusso.lua`** — optional MoneyMoney export extension for manual JSON export
 - Config at `~/.flusso/config.json`
 - No external state files — a MoneyMoney category is the single source of truth for dedup
 
@@ -26,7 +25,6 @@ Each synced transaction gets assigned a configurable MoneyMoney category (e.g. "
 - `curl`, `jq`, `osascript`, `plutil` (all macOS built-ins except jq)
 - MoneyMoney AppleScript API: https://moneymoney.app/applescript/
 - YNAB API: https://api.ynab.com/v1
-- MoneyMoney export extension API: https://moneymoney.app/api/export/
 
 ### Security considerations
 
