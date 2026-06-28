@@ -4,7 +4,7 @@ set -euo pipefail
 # Flusso — MoneyMoney → YNAB Sync CLI
 # https://github.com/johannesbraeunig/flusso
 
-VERSION="0.0.1"
+VERSION="0.1.0"
 
 # Clean up temp files on exit
 trap 'rm -f /tmp/flusso_*.tmp 2>/dev/null' EXIT
@@ -301,6 +301,35 @@ cmd_setup() {
   echo ""
 }
 
+# ── reset ────────────────────────────────────────────────────
+
+cmd_reset() {
+  echo ""
+  echo "$(bold "Flusso Reset")"
+  echo "$(dim "Start your configuration over from scratch")"
+  echo ""
+
+  if [ -f "$CONFIG_FILE" ]; then
+    local backup="$CONFIG_FILE.bak"
+    echo "This replaces your current configuration at $CONFIG_FILE."
+    echo "The existing config will be backed up to $backup."
+    echo ""
+    read -rp "Continue? [y/N]: " confirm
+    case "$confirm" in
+      y|Y|yes|Yes) ;;
+      *) echo "Aborted. Nothing was changed."; exit 0 ;;
+    esac
+    (umask 077 && cp "$CONFIG_FILE" "$backup")
+    echo "$(green "✓") Backed up existing config to $backup"
+  else
+    echo "No existing configuration found at $CONFIG_FILE."
+    echo "Starting a fresh setup."
+  fi
+
+  # Re-run the full wizard; it overwrites CONFIG_FILE with the new config.
+  cmd_setup "$@"
+}
+
 # ── sync ─────────────────────────────────────────────────────
 
 cmd_sync() {
@@ -537,6 +566,7 @@ $(bold "Usage:")
 
 $(bold "Commands:")
   setup             Interactive configuration wizard
+  reset             Start configuration over from scratch (backs up old config)
   sync              Sync transactions from MoneyMoney to YNAB
   status            Show sync state for all accounts
 
@@ -546,6 +576,7 @@ $(bold "Sync Options:")
 
 $(bold "Examples:")
   flusso setup                  # First-time configuration
+  flusso reset                  # Start over (e.g. after a YNAB fresh start)
   flusso sync                   # Sync all accounts
   flusso sync --dry-run         # Preview without syncing
   flusso sync --account "Name"  # Sync one account
@@ -560,6 +591,7 @@ EOF
 
 case "${1:-}" in
   setup)     shift; cmd_setup "$@" ;;
+  reset)     shift; cmd_reset "$@" ;;
   sync)      shift; cmd_sync "$@" ;;
   status)    shift; cmd_status "$@" ;;
   --version|-v) echo "flusso $VERSION" ;;

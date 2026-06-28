@@ -59,6 +59,16 @@ Interactive wizard that:
 6. Selects a MoneyMoney category to mark synced transactions
 7. Writes `~/.flusso/config.json`
 
+### `flusso reset`
+
+Start your configuration over from scratch — useful after a [YNAB fresh start](https://support.ynab.com/en_us/starting-fresh-a-guide-Sklll8aZc), when switching budgets, or whenever you want to set a new start date and re-map accounts.
+
+It backs up your existing `~/.flusso/config.json` to `config.json.bak` (after confirmation), then runs the full `setup` wizard. If no config exists yet, it simply starts a fresh setup.
+
+```bash
+flusso reset
+```
+
 ### `flusso sync`
 
 Syncs all configured accounts:
