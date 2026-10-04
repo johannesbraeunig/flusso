@@ -17,6 +17,12 @@
       "moneymoney_account": "1234********5678",
       "ynab_account_id": "YNAB_ACCOUNT_ID_2",
       "start_date": "2026-03-01"
+    },
+    {
+      "name": "Depot",
+      "moneymoney_account": "123456789",
+      "ynab_account_id": "YNAB_ACCOUNT_ID_3",
+      "mode": "balance"
     }
   ]
 }

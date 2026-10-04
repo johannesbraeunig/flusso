@@ -4,7 +4,7 @@ set -euo pipefail
 # Flusso — MoneyMoney → YNAB Sync CLI
 # https://github.com/johannesbraeunig/flusso
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # Clean up temp files on exit
 trap 'rm -f /tmp/flusso_*.tmp 2>/dev/null' EXIT
@@ -57,6 +57,25 @@ check_deps() {
   done
 }
 
+# Format YNAB milliunits as a decimal amount (e.g. -12340 → -12.34)
+fmt_milliunits() {
+  env LC_NUMERIC=C printf "%.2f" "$(echo "scale=3; $1 / 1000" | bc)"
+}
+
+# ── MoneyMoney ───────────────────────────────────────────────
+
+# Export all MoneyMoney accounts (excluding groups) as JSON
+mm_export_accounts() {
+  local plist
+  plist=$(osascript -e 'tell application "MoneyMoney" to export accounts' 2>&1) || return 1
+  # Icons are base64 <data> blobs and dates aren't supported by plutil's JSON output
+  echo "$plist" \
+    | perl -0777 -pe 's|<data>\s*[^<]*</data>|<string>ICON</string>|gs' \
+    | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' \
+    | plutil -convert json -o - - \
+    | jq '[.[] | select(.group == false)]'
+}
+
 # ── Config ───────────────────────────────────────────────────
 
 load_config() {
@@ -94,6 +113,111 @@ ynab_post() {
   local rc=$?
   rm -f "$tmpfile"
   return $rc
+}
+
+# ── Account mapping (shared by setup and add) ──────────────
+
+# Interactively map MoneyMoney accounts to YNAB accounts.
+# Requires API_TOKEN and BUDGET_ID. Sets MAPPED_ACCOUNTS_JSON (array).
+map_accounts() {
+  local budget_name="$1" default_start="$2"
+
+  echo "Map your MoneyMoney accounts to the corresponding YNAB accounts."
+  echo "For each mapping, enter the MoneyMoney account details first,"
+  echo "then select which YNAB account it should sync to."
+  echo ""
+  local accounts_json ynab_account_count mm_accounts
+  accounts_json=$(ynab_get "/budgets/$BUDGET_ID/accounts")
+  ynab_account_count=$(echo "$accounts_json" | jq '[.data.accounts[] | select(.closed == false)] | length')
+  [ "$ynab_account_count" -eq 0 ] && die "No open accounts in this budget."
+  # Used to detect portfolio accounts; not fatal if MoneyMoney is unavailable
+  mm_accounts=$(mm_export_accounts 2>/dev/null) || mm_accounts="[]"
+
+  MAPPED_ACCOUNTS_JSON="[]"
+  local mapping_num=1
+
+  while true; do
+    echo "$(bold "Account mapping #$mapping_num")"
+    echo ""
+
+    # 1. MoneyMoney details
+    local mm_name mm_account acct_start is_portfolio default_mode mode_choice mode
+    read -rp "MoneyMoney account name: " mm_name
+    read -rp "MoneyMoney account number (IBAN, card or depot number): " mm_account
+
+    # 2. Sync mode — portfolios have no transactions, only a market value
+    is_portfolio=$(echo "$mm_accounts" | jq --arg n "$mm_account" 'any(.[]; .accountNumber == $n and .portfolio == true)')
+    default_mode=1
+    [ "$is_portfolio" = true ] && default_mode=2
+    echo ""
+    echo "Sync mode:"
+    echo "  $(bold "[1]")  Transactions  $(dim "— checking, savings, credit card accounts")"
+    echo "  $(bold "[2]")  Balance       $(dim "— depots: post value changes as adjustments")"
+    [ "$is_portfolio" = true ] && echo "$(dim "This looks like a depot in MoneyMoney.")"
+    read -rp "Sync mode [1-2] [$default_mode]: " mode_choice
+    case "${mode_choice:-$default_mode}" in
+      1) mode="transactions" ;;
+      2) mode="balance" ;;
+      *) echo "$(red "Error:") Invalid selection, skipping."; echo ""; continue ;;
+    esac
+
+    acct_start=""
+    if [ "$mode" = "transactions" ]; then
+      read -rp "Custom start date? (empty = global) [$default_start]: " acct_start
+    fi
+
+    # 3. Pick YNAB account
+    echo ""
+    echo "YNAB accounts in $(bold "$budget_name"):"
+    echo ""
+    for i in $(seq 0 $((ynab_account_count - 1))); do
+      local acct_name balance
+      acct_name=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$i].name")
+      balance=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$i].balance")
+      printf "  %s  %-30s %s\n" "$(bold "[$((i + 1))]")" "$acct_name" "$(dim "$(fmt_milliunits "$balance") €")"
+    done
+
+    echo ""
+    local acct_choice
+    read -rp "Sync to YNAB account [1-$ynab_account_count]: " acct_choice
+
+    local acct_idx=$((acct_choice - 1))
+    if [ "$acct_idx" -lt 0 ] || [ "$acct_idx" -ge "$ynab_account_count" ]; then
+      echo "$(red "Error:") Invalid selection, skipping."
+      echo ""
+      continue
+    fi
+
+    local ynab_acct_id ynab_acct_name
+    ynab_acct_id=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$acct_idx].id")
+    ynab_acct_name=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$acct_idx].name")
+
+    local acct_obj
+    acct_obj=$(jq -n \
+      --arg name "$mm_name" \
+      --arg acct "$mm_account" \
+      --arg ynab_id "$ynab_acct_id" \
+      '{name: $name, moneymoney_account: $acct, ynab_account_id: $ynab_id}')
+
+    if [ "$mode" = "balance" ]; then
+      acct_obj=$(echo "$acct_obj" | jq '. + {mode: "balance"}')
+    fi
+    if [ -n "$acct_start" ]; then
+      acct_obj=$(echo "$acct_obj" | jq --arg sd "$acct_start" '. + {start_date: $sd}')
+    fi
+
+    MAPPED_ACCOUNTS_JSON=$(echo "$MAPPED_ACCOUNTS_JSON" | jq --argjson a "$acct_obj" '. + [$a]')
+
+    echo ""
+    echo "$(green "✓") $mm_name ($mm_account) → $ynab_acct_name $(dim "[$mode]")"
+    echo ""
+    mapping_num=$((mapping_num + 1))
+    read -rp "Add another account? [y/N]: " add_more
+    case "$add_more" in
+      y|Y|yes|Yes) echo ""; continue ;;
+      *) break ;;
+    esac
+  done
 }
 
 # ════════════════════════════════════════════════════════════
@@ -165,86 +289,8 @@ cmd_setup() {
 
   # Map accounts
   header "5/6 Map Accounts"
-  echo "Map your MoneyMoney accounts to the corresponding YNAB accounts."
-  echo "For each mapping, enter the MoneyMoney account details first,"
-  echo "then select which YNAB account it should sync to."
-  echo ""
-  local accounts_json ynab_account_count
-  accounts_json=$(ynab_get "/budgets/$BUDGET_ID/accounts")
-  ynab_account_count=$(echo "$accounts_json" | jq '[.data.accounts[] | select(.closed == false)] | length')
-  [ "$ynab_account_count" -eq 0 ] && die "No open accounts in this budget."
-
-  local ACCOUNTS_JSON="["
-  local first_account=true
-  local mapping_num=1
-
-  while true; do
-    echo "$(bold "Account mapping #$mapping_num")"
-    echo ""
-
-    # 1. MoneyMoney details
-    local mm_name mm_account acct_start
-    read -rp "MoneyMoney account name: " mm_name
-    read -rp "MoneyMoney account number (IBAN or card number): " mm_account
-    read -rp "Custom start date? (empty = global) [$START_DATE]: " acct_start
-
-    # 2. Pick YNAB account
-    echo ""
-    echo "YNAB accounts in $(bold "$budget_name"):"
-    echo ""
-    for i in $(seq 0 $((ynab_account_count - 1))); do
-      local acct_name balance balance_fmt
-      acct_name=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$i].name")
-      balance=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$i].balance")
-      balance_fmt=$(env LC_NUMERIC=C printf "%.2f" "$(echo "scale=2; $balance / 1000" | bc)")
-      printf "  %s  %-30s %s\n" "$(bold "[$((i + 1))]")" "$acct_name" "$(dim "$balance_fmt €")"
-    done
-
-    echo ""
-    local acct_choice
-    read -rp "Sync to YNAB account [1-$ynab_account_count]: " acct_choice
-
-    local acct_idx=$((acct_choice - 1))
-    if [ "$acct_idx" -lt 0 ] || [ "$acct_idx" -ge "$ynab_account_count" ]; then
-      echo "$(red "Error:") Invalid selection, skipping."
-      echo ""
-      continue
-    fi
-
-    local ynab_acct_id ynab_acct_name
-    ynab_acct_id=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$acct_idx].id")
-    ynab_acct_name=$(echo "$accounts_json" | jq -r "[.data.accounts[] | select(.closed == false)][$acct_idx].name")
-
-    local acct_obj
-    acct_obj=$(jq -n \
-      --arg name "$mm_name" \
-      --arg acct "$mm_account" \
-      --arg ynab_id "$ynab_acct_id" \
-      '{name: $name, moneymoney_account: $acct, ynab_account_id: $ynab_id}')
-
-    if [ -n "$acct_start" ]; then
-      acct_obj=$(echo "$acct_obj" | jq --arg sd "$acct_start" '. + {start_date: $sd}')
-    fi
-
-    if [ "$first_account" = true ]; then
-      first_account=false
-    else
-      ACCOUNTS_JSON+=","
-    fi
-    ACCOUNTS_JSON+="$acct_obj"
-
-    echo ""
-    echo "$(green "✓") $mm_name ($mm_account) → $ynab_acct_name"
-    echo ""
-    mapping_num=$((mapping_num + 1))
-    read -rp "Add another account? [y/N]: " add_more
-    case "$add_more" in
-      y|Y|yes|Yes) echo ""; continue ;;
-      *) break ;;
-    esac
-  done
-
-  ACCOUNTS_JSON+="]"
+  map_accounts "$budget_name" "$START_DATE"
+  local ACCOUNTS_JSON="$MAPPED_ACCOUNTS_JSON"
 
   # Sync category
   header "6/6 MoneyMoney Category"
@@ -330,6 +376,111 @@ cmd_reset() {
   cmd_setup "$@"
 }
 
+# ── add ──────────────────────────────────────────────────────
+
+cmd_add() {
+  check_deps curl jq osascript plutil
+  load_config
+
+  echo ""
+  echo "$(bold "Flusso — Add Accounts")"
+  echo "$(dim "Map additional MoneyMoney accounts to YNAB")"
+  echo ""
+
+  local budget_name
+  budget_name=$(ynab_get "/budgets" | jq -r --arg id "$BUDGET_ID" '.data.budgets[] | select(.id == $id) | .name') \
+    || die "Invalid token or YNAB API unreachable."
+  [ -n "$budget_name" ] || die "Configured budget not found in YNAB. Run 'flusso reset'."
+
+  map_accounts "$budget_name" "$GLOBAL_START_DATE"
+
+  # Skip accounts that are already configured
+  local duplicates
+  duplicates=$(jq -r --argjson new "$MAPPED_ACCOUNTS_JSON" '
+    [.accounts[].moneymoney_account] as $existing
+    | $new[] | select(.moneymoney_account as $a | $existing | index($a)) | .name
+  ' "$CONFIG_FILE")
+  if [ -n "$duplicates" ]; then
+    while IFS= read -r dup; do
+      echo "$(dim "Skipping \"$dup\" — already configured.")"
+    done <<< "$duplicates"
+  fi
+
+  local updated
+  updated=$(jq --argjson new "$MAPPED_ACCOUNTS_JSON" '
+    [.accounts[].moneymoney_account] as $existing
+    | .accounts += [$new[] | select(.moneymoney_account as $a | $existing | index($a) | not)]
+  ' "$CONFIG_FILE")
+  (umask 077 && echo "$updated" > "$CONFIG_FILE")
+
+  echo "$(green "✓") Config updated: $CONFIG_FILE"
+  echo ""
+}
+
+# ── sync: balance mode ───────────────────────────────────────
+
+# Brings the YNAB account balance in line with MoneyMoney by posting the
+# difference as a single adjustment transaction (e.g. depot value changes).
+# Sets BALANCE_ADJUSTED=1 if an adjustment was posted (or would be, in dry run).
+sync_balance() {
+  local mm_acct="$1" ynab_account_id="$2" dry_run="$3" mm_accounts="$4"
+
+  local mm_balance
+  mm_balance=$(echo "$mm_accounts" | jq --arg n "$mm_acct" \
+    'first(.[] | select(.accountNumber == $n) | .balance[0][0] * 1000 | round) // empty')
+  if [ -z "$mm_balance" ]; then
+    echo "$(red "Error:") Account not found in MoneyMoney."
+    return 1
+  fi
+
+  local ynab_balance
+  if ! ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" | jq '.data.account.balance'); then
+    echo "$(red "Error:") Could not fetch YNAB account balance."
+    return 1
+  fi
+
+  local diff=$((mm_balance - ynab_balance))
+  echo "$(dim "MoneyMoney: $(fmt_milliunits "$mm_balance")  YNAB: $(fmt_milliunits "$ynab_balance")")"
+
+  if [ "$diff" -eq 0 ]; then
+    echo "$(green "✓") Balance up to date."
+    return 0
+  fi
+
+  if [ "$dry_run" = true ]; then
+    echo "Adjustment of $(bold "$(fmt_milliunits "$diff")") would be posted."
+    BALANCE_ADJUSTED=1
+    return 0
+  fi
+
+  local today payload
+  today=$(date +%Y-%m-%d)
+  payload=$(jq -n \
+    --arg acct "$ynab_account_id" \
+    --arg date "$today" \
+    --argjson amount "$diff" \
+    --arg memo "MoneyMoney balance: $(fmt_milliunits "$mm_balance")" \
+    '{transaction: {
+        account_id: $acct,
+        date: $date,
+        amount: $amount,
+        payee_name: "Balance Adjustment",
+        memo: $memo,
+        cleared: "cleared",
+        import_id: ("FLUSSO:BAL:" + $date + ":" + ($amount | tostring))
+      }}')
+
+  local response
+  if ! response=$(ynab_post "/budgets/$BUDGET_ID/transactions" "$payload" 2>&1); then
+    echo "$(red "Error:") YNAB API request failed."
+    echo "$(dim "$response")"
+    return 1
+  fi
+
+  echo "$(green "✓") Adjustment of $(fmt_milliunits "$diff") posted."
+  BALANCE_ADJUSTED=1
+}
+
 # ── sync ─────────────────────────────────────────────────────
 
 cmd_sync() {
@@ -359,14 +510,17 @@ cmd_sync() {
 
   local total_synced=0
   local total_skipped=0
+  local total_adjusted=0
+  local mm_accounts=""
 
   for i in $(seq 0 $((account_count - 1))); do
-    local name mm_acct ynab_account_id account_start_date start_date
+    local name mm_acct ynab_account_id account_start_date start_date mode
     name=$(jq -r ".accounts[$i].name" "$CONFIG_FILE")
     mm_acct=$(jq -r ".accounts[$i].moneymoney_account" "$CONFIG_FILE")
     ynab_account_id=$(jq -r ".accounts[$i].ynab_account_id" "$CONFIG_FILE")
     account_start_date=$(jq -r ".accounts[$i].start_date // empty" "$CONFIG_FILE")
     start_date="${account_start_date:-$GLOBAL_START_DATE}"
+    mode=$(jq -r ".accounts[$i].mode // \"transactions\"" "$CONFIG_FILE")
 
     # Filter by account name if specified
     if [ -n "$filter_account" ] && [ "$filter_account" != "$name" ]; then
@@ -374,6 +528,26 @@ cmd_sync() {
     fi
 
     echo "$(bold "── $name ──") $(dim "($mm_acct)")"
+
+    if [ "$mode" = "balance" ]; then
+      # Fetch MoneyMoney balances once for all balance-mode accounts
+      if [ -z "$mm_accounts" ] && ! mm_accounts=$(mm_export_accounts 2>&1); then
+        echo "$(red "Error:") Could not export accounts from MoneyMoney."
+        echo "$(dim "$mm_accounts")"
+        mm_accounts=""
+        echo ""
+        continue
+      fi
+      BALANCE_ADJUSTED=0
+      sync_balance "$mm_acct" "$ynab_account_id" "$dry_run" "$mm_accounts" || true
+      total_adjusted=$((total_adjusted + BALANCE_ADJUSTED))
+      echo ""
+      continue
+    elif [ "$mode" != "transactions" ]; then
+      echo "$(red "Error:") Unknown mode \"$mode\" (expected transactions or balance)."
+      echo ""
+      continue
+    fi
 
     # Validate inputs before passing to AppleScript
     validate_account_id "$mm_acct"
@@ -489,17 +663,20 @@ cmd_sync() {
     echo ""
   done
 
+  local adjusted_note=""
   if [ "$dry_run" = true ]; then
-    echo "$(bold "Dry run complete.") $total_skipped transaction(s) would be synced."
+    [ "$total_adjusted" -gt 0 ] && adjusted_note=" $total_adjusted balance adjustment(s) would be posted."
+    echo "$(bold "Dry run complete.") $total_skipped transaction(s) would be synced.$adjusted_note"
   else
-    echo "$(bold "$(green "✓ Sync complete.")") $total_synced transaction(s) synced."
+    [ "$total_adjusted" -gt 0 ] && adjusted_note=" $total_adjusted balance adjustment(s) posted."
+    echo "$(bold "$(green "✓ Sync complete.")") $total_synced transaction(s) synced.$adjusted_note"
   fi
 }
 
 # ── status ───────────────────────────────────────────────────
 
 cmd_status() {
-  check_deps jq osascript plutil
+  check_deps curl jq osascript plutil
   load_config
 
   echo ""
@@ -514,12 +691,35 @@ cmd_status() {
     return
   fi
 
+  local mm_accounts=""
+
   for i in $(seq 0 $((account_count - 1))); do
-    local name mm_acct account_start start_date
+    local name mm_acct account_start start_date mode
     name=$(jq -r ".accounts[$i].name" "$CONFIG_FILE")
     mm_acct=$(jq -r ".accounts[$i].moneymoney_account" "$CONFIG_FILE")
     account_start=$(jq -r ".accounts[$i].start_date // empty" "$CONFIG_FILE")
     start_date="${account_start:-$GLOBAL_START_DATE}"
+    mode=$(jq -r ".accounts[$i].mode // \"transactions\"" "$CONFIG_FILE")
+
+    if [ "$mode" = "balance" ]; then
+      local ynab_account_id mm_balance ynab_balance
+      ynab_account_id=$(jq -r ".accounts[$i].ynab_account_id" "$CONFIG_FILE")
+      [ -z "$mm_accounts" ] && { mm_accounts=$(mm_export_accounts 2>/dev/null) || mm_accounts="[]"; }
+      mm_balance=$(echo "$mm_accounts" | jq --arg n "$mm_acct" \
+        'first(.[] | select(.accountNumber == $n) | .balance[0][0] * 1000 | round) // empty')
+      ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" 2>/dev/null | jq '.data.account.balance // empty') || ynab_balance=""
+
+      local state
+      if [ -z "$mm_balance" ] || [ -z "$ynab_balance" ]; then
+        state="$(red "unavailable")"
+      elif [ "$mm_balance" -eq "$ynab_balance" ]; then
+        state="$(green "in sync") at $(fmt_milliunits "$mm_balance")"
+      else
+        state="$(fmt_milliunits $((mm_balance - ynab_balance))) to adjust"
+      fi
+      printf "  %-25s %s  %s\n" "$(bold "$name")" "$state" "$(dim "balance")"
+      continue
+    fi
 
     # Count synced transactions by checking labels in MoneyMoney
     local synced_count=0 total_count=0
@@ -567,6 +767,7 @@ $(bold "Usage:")
 $(bold "Commands:")
   setup             Interactive configuration wizard
   reset             Start configuration over from scratch (backs up old config)
+  add               Add more account mappings to the existing config
   sync              Sync transactions from MoneyMoney to YNAB
   status            Show sync state for all accounts
 
@@ -577,6 +778,7 @@ $(bold "Sync Options:")
 $(bold "Examples:")
   flusso setup                  # First-time configuration
   flusso reset                  # Start over (e.g. after a YNAB fresh start)
+  flusso add                    # Add e.g. a savings account or depot
   flusso sync                   # Sync all accounts
   flusso sync --dry-run         # Preview without syncing
   flusso sync --account "Name"  # Sync one account
@@ -592,6 +794,7 @@ EOF
 case "${1:-}" in
   setup)     shift; cmd_setup "$@" ;;
   reset)     shift; cmd_reset "$@" ;;
+  add)       shift; cmd_add "$@" ;;
   sync)      shift; cmd_sync "$@" ;;
   status)    shift; cmd_status "$@" ;;
   --version|-v) echo "flusso $VERSION" ;;

@@ -8,6 +8,8 @@ flusso sync
 
 Flusso talks to MoneyMoney via AppleScript, fetches your transactions, filters out duplicates and pending entries, and sends everything to YNAB via their API. Synced transactions are categorized directly in MoneyMoney — no external state files needed.
 
+Checking, savings and credit card accounts sync transaction by transaction. Brokerage accounts (depots) sync their balance: Flusso posts the change in market value as an adjustment, so your YNAB tracking account always matches MoneyMoney.
+
 ## Prerequisites
 
 - macOS (required for MoneyMoney + AppleScript)
@@ -69,6 +71,23 @@ It backs up your existing `~/.flusso/config.json` to `config.json.bak` (after co
 flusso reset
 ```
 
+### `flusso add`
+
+Adds more account mappings to your existing config without redoing the full setup — e.g. when you want to start syncing a savings account or depot. Accounts that are already configured are skipped.
+
+```bash
+flusso add
+```
+
+For each account you pick a sync mode:
+
+| Mode | Use for | What it does |
+|------|---------|--------------|
+| `transactions` (default) | Checking, savings (Tagesgeld), credit cards, loans | Syncs every booked transaction |
+| `balance` | Depots / brokerage accounts | Posts the difference between the MoneyMoney and YNAB balance as one adjustment |
+
+Depots are detected automatically and pre-select `balance` mode.
+
 ### `flusso sync`
 
 Syncs all configured accounts:
@@ -78,6 +97,8 @@ Syncs all configured accounts:
 4. Categorizes synced transactions in MoneyMoney
 
 The category in MoneyMoney is the single source of truth — no state files to maintain. Re-running `flusso sync` only picks up uncategorized transactions.
+
+Accounts in `balance` mode work differently: Flusso compares the current balance in MoneyMoney with the YNAB account balance and, if they differ, posts one "Balance Adjustment" transaction for the difference (dated today). Transfers you record in YNAB (e.g. a monthly savings plan from checking to the depot) are already part of the YNAB balance, so the adjustment only reflects market value changes. Map depots to a YNAB **tracking account**, so adjustments don't affect your budget.
 
 **Options:**
 
@@ -101,6 +122,7 @@ $ flusso status
 Flusso Status
 
   Checking Account          7 synced, 2 pending  since 2026-04-01
+  Depot                     152.30 to adjust  balance
 ```
 
 ## Configuration
@@ -127,6 +149,12 @@ Config is stored at `~/.flusso/config.json`:
       "moneymoney_account": "1234********5678",
       "ynab_account_id": "YNAB_ACCOUNT_ID_2",
       "start_date": "2026-03-01"
+    },
+    {
+      "name": "Depot",
+      "moneymoney_account": "123456789",
+      "ynab_account_id": "YNAB_ACCOUNT_ID_3",
+      "mode": "balance"
     }
   ]
 }
@@ -140,9 +168,10 @@ Config is stored at `~/.flusso/config.json`:
 | `sync_category.uuid` | MoneyMoney category UUID assigned to synced transactions |
 | `sync_category.name` | Display name of the sync category |
 | `accounts[].name` | Display name for the account |
-| `accounts[].moneymoney_account` | Account number as shown in MoneyMoney (IBAN or card number) |
+| `accounts[].moneymoney_account` | Account number as shown in MoneyMoney (IBAN, card or depot number) |
 | `accounts[].ynab_account_id` | Corresponding YNAB account ID (selected during setup) |
 | `accounts[].start_date` | Optional per-account override for the global start date |
+| `accounts[].mode` | Optional: `transactions` (default) or `balance` (for depots) |
 
 ## Example
 
@@ -192,7 +221,12 @@ then select which YNAB account it should sync to.
 Account mapping #1
 
 MoneyMoney account name: Checking Account
-MoneyMoney account number (IBAN or card number): DE00000000000000000000
+MoneyMoney account number (IBAN, card or depot number): DE00000000000000000000
+
+Sync mode:
+  [1]  Transactions  — checking, savings, credit card accounts
+  [2]  Balance       — depots: post value changes as adjustments
+Sync mode [1-2] [1]:
 Custom start date? (empty = global) [2026-04-01]:
 
 YNAB accounts in My Budget:
@@ -202,7 +236,7 @@ YNAB accounts in My Budget:
 
 Sync to YNAB account [1-2]: 1
 
-✓ Checking Account (DE00000000000000000000) → Checking
+✓ Checking Account (DE00000000000000000000) → Checking [transactions]
 
 Add another account? [y/N]: n
 
