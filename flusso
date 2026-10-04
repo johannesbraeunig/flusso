@@ -145,6 +145,11 @@ map_accounts() {
     read -rp "MoneyMoney account name: " mm_name
     read -rp "MoneyMoney account number (IBAN, card or depot number): " mm_account
 
+    if [ "$mm_accounts" != "[]" ] \
+      && [ "$(echo "$mm_accounts" | jq --arg n "$mm_account" 'any(.[]; .accountNumber == $n)')" != true ]; then
+      echo "$(red "Warning:") No MoneyMoney account with number \"$mm_account\" found."
+    fi
+
     # 2. Sync mode — portfolios have no transactions, only a market value
     is_portfolio=$(echo "$mm_accounts" | jq --arg n "$mm_account" 'any(.[]; .accountNumber == $n and .portfolio == true)')
     default_mode=1
@@ -164,6 +169,11 @@ map_accounts() {
     acct_start=""
     if [ "$mode" = "transactions" ]; then
       read -rp "Custom start date? (empty = global) [$default_start]: " acct_start
+      if [ -n "$acct_start" ] && ! [[ "$acct_start" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo "$(red "Error:") Invalid date format (expected YYYY-MM-DD), skipping."
+        echo ""
+        continue
+      fi
     fi
 
     # 3. Pick YNAB account
@@ -181,7 +191,8 @@ map_accounts() {
     local acct_choice
     read -rp "Sync to YNAB account [1-$ynab_account_count]: " acct_choice
 
-    local acct_idx=$((acct_choice - 1))
+    local acct_idx=-1
+    [[ "$acct_choice" =~ ^[0-9]+$ ]] && acct_idx=$((acct_choice - 1))
     if [ "$acct_idx" -lt 0 ] || [ "$acct_idx" -ge "$ynab_account_count" ]; then
       echo "$(red "Error:") Invalid selection, skipping."
       echo ""
@@ -434,7 +445,8 @@ sync_balance() {
   fi
 
   local ynab_balance
-  if ! ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" | jq '.data.account.balance'); then
+  if ! ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" | jq '.data.account.balance // empty') \
+    || [ -z "$ynab_balance" ]; then
     echo "$(red "Error:") Could not fetch YNAB account balance."
     return 1
   fi
@@ -475,6 +487,11 @@ sync_balance() {
     echo "$(red "Error:") YNAB API request failed."
     echo "$(dim "$response")"
     return 1
+  fi
+
+  if [ "$(echo "$response" | jq '.data.duplicate_import_ids // [] | length')" -gt 0 ]; then
+    echo "$(dim "Adjustment of $(fmt_milliunits "$diff") was already imported today, skipped.")"
+    return 0
   fi
 
   echo "$(green "✓") Adjustment of $(fmt_milliunits "$diff") posted."

@@ -5,7 +5,7 @@ status: completed
 type: feature
 priority: normal
 created_at: 2026-10-04T18:39:47Z
-updated_at: 2026-10-04T18:42:05Z
+updated_at: 2026-10-04T18:47:48Z
 ---
 
 Savings accounts (Tagesgeld) already work via transaction sync but require full re-setup to add. Brokerage accounts (Depot) have no transactions in MoneyMoney — sync their balance instead by posting the difference as an adjustment.
@@ -25,3 +25,11 @@ Savings accounts (Tagesgeld) already work via transaction sync but require full 
 - `flusso add` appends mappings to the existing config and skips already-configured accounts.
 - `status` shows in-sync / to-adjust state for balance accounts.
 - README, help and config.example.json updated.
+
+## Review Fixes
+
+- Missing YNAB balance no longer treated as 0 (would have posted the full balance).
+- Duplicate import_id responses reported as skipped instead of posted.
+- Non-numeric YNAB account selection no longer crashes under `set -u`.
+- Per-account start date validated during mapping.
+- Warning when the entered account number is unknown to MoneyMoney.
