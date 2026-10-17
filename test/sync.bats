@@ -193,7 +193,7 @@ load test_helper
 }
 
 @test "Balance Sync posts a Balance Adjustment for the difference" {
-  write_config '[{"name": "Brokerage", "moneymoney_account": "123456789", "ynab_account_id": "ynab-brokerage", "mode": "balance"}]'
+  write_config "[$BROKERAGE_MAPPING]"
   mm_account 123456789 10152.3 true | mm_has_accounts
   ynab_has_balance ynab-brokerage 10000000
   ynab_accepts_transactions 1
@@ -217,7 +217,7 @@ load test_helper
 }
 
 @test "Balance Sync posts nothing when the balances match" {
-  write_config '[{"name": "Brokerage", "moneymoney_account": "123456789", "ynab_account_id": "ynab-brokerage", "mode": "balance"}]'
+  write_config "[$BROKERAGE_MAPPING]"
   mm_account 123456789 10000 true | mm_has_accounts
   ynab_has_balance ynab-brokerage 10000000
 

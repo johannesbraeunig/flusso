@@ -8,6 +8,8 @@ FLUSSO="$BATS_TEST_DIRNAME/../flusso"
 SYNC_CATEGORY_UUID="11111111-2222-3333-4444-555555555555"
 BUDGET_ID="budget-1"
 YNAB_CHECKING="ynab-checking"
+# Account Mapping of a Brokerage Account in Balance Sync
+BROKERAGE_MAPPING='{"name": "Brokerage", "moneymoney_account": "123456789", "ynab_account_id": "ynab-brokerage", "mode": "balance"}'
 
 setup() {
   export HOME="$BATS_TEST_TMPDIR/home"
@@ -96,6 +98,12 @@ mm_has_single_transaction() {
   } | plist_document > "$FAKE_DIR/mm/export-transactions.plist"
 }
 
+# mm_export_is_garbled [MONEYMONEY_ACCOUNT]
+# Serves an "export transactions" response that isn't a valid plist.
+mm_export_is_garbled() {
+  echo "<plist><dict><key>transactions" > "$FAKE_DIR/mm/export-transactions${1:+-$1}.plist"
+}
+
 # mm_account NUMBER BALANCE PORTFOLIO
 # Prints one account <dict> as MoneyMoney's "export accounts" does (with icon blob).
 mm_account() {
@@ -178,7 +186,12 @@ ynab_has_balance() {
 
 # MoneyMoney Accounts whose transactions were exported, one per line.
 exported_accounts() {
-  jq -r 'select(.command == "export-transactions") | .args[0]' "$FAKE_DIR/osascript.log"
+  transaction_exports | cut -d ' ' -f 1
+}
+
+# Transaction exports requested from MoneyMoney, as "ACCOUNT START_DATE" lines.
+transaction_exports() {
+  jq -r 'select(.command == "export-transactions") | .args | join(" ")' "$FAKE_DIR/osascript.log"
 }
 
 # All requests sent to YNAB, as one JSON array.
