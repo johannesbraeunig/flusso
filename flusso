@@ -136,6 +136,17 @@ mm_export_transactions() {
     || return $MM_PARSE_FAILED
 }
 
+# Split exported transactions (JSON array on stdin) by sync state:
+# {synced, unsynced, pending}. This is the only place that decides it.
+mm_classify_transactions() {
+  local category_uuid="$1"
+  jq --arg cat_uuid "$category_uuid" '{
+    synced: map(select(.booked == true and .categoryUuid == $cat_uuid)),
+    unsynced: map(select(.booked == true and .categoryUuid != $cat_uuid)),
+    pending: map(select(.booked == false))
+  }'
+}
+
 # Mark MoneyMoney transactions (ids on stdin, one per line) as synced by
 # assigning the Sync Category. Prints how many were marked.
 mm_mark_synced() {
@@ -583,10 +594,8 @@ sync_balance() {
 # with the same amount. When the booked version is synced later, YNAB matches
 # it to that transaction (same amount, date ±10 days).
 new_pending_transactions() {
-  local transactions_json="$1" ynab_account_id="$2" start_date="$3"
+  local pending="$1" ynab_account_id="$2" start_date="$3"
 
-  local pending
-  pending=$(echo "$transactions_json" | jq 'map(select(.booked == false))')
   if [ "$(echo "$pending" | jq 'length')" -eq 0 ]; then
     echo "[]"
     return 0
@@ -698,26 +707,20 @@ cmd_sync() {
         ;;
     esac
 
-    # Filter: only booked transactions not yet assigned the sync category
-    local booked
-    booked=$(echo "$transactions_json" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
-      map(select(
-          .booked == true
-          and (.categoryUuid != $cat_uuid)
-      ))
-    ')
+    local classified unsynced
+    classified=$(echo "$transactions_json" | mm_classify_transactions "$SYNC_CATEGORY_UUID")
+    unsynced=$(echo "$classified" | jq '.unsynced')
 
-    local pending="[]"
+    local new_pending="[]"
     if [ "$include_pending" = true ] \
-      && ! pending=$(new_pending_transactions "$transactions_json" "$ynab_account_id" "$start_date"); then
+      && ! new_pending=$(new_pending_transactions "$(echo "$classified" | jq '.pending')" "$ynab_account_id" "$start_date"); then
       echo "$(red "Error:") Could not fetch YNAB transactions, skipping pending transactions."
-      pending="[]"
+      new_pending="[]"
     fi
 
-    local filtered tx_count pending_count
-    filtered=$(jq -n --argjson b "$booked" --argjson p "$pending" '$b + $p')
-    tx_count=$(echo "$filtered" | jq 'length')
-    pending_count=$(echo "$pending" | jq 'length')
+    local tx_count pending_count
+    pending_count=$(echo "$new_pending" | jq 'length')
+    tx_count=$(( $(echo "$unsynced" | jq 'length') + pending_count ))
 
     if [ "$tx_count" -eq 0 ]; then
       echo "$(green "✓") No new transactions."
@@ -735,10 +738,13 @@ cmd_sync() {
       echo ""
       printf "  $(dim "%-12s %-10s %-28s %s")\n" "DATE" "AMOUNT" "PAYEE" "MEMO"
       printf "  $(dim "%-12s %-10s %-28s %s")\n" "----------" "----------" "----------------------------" "----------------------------"
-      # booked comes first: IFS collapses empty fields (e.g. no memo) in the middle
-      echo "$filtered" | jq -r '.[] | "\(.booked)\t\(.bookingDate[:10] // .bookingDate)\t\(.amount * 100 | round / 100)\t\(.name // "Unknown")\t\(.purpose // "")"' | while IFS=$'\t' read -r is_booked date amount payee memo; do
+      # The kind comes first: IFS collapses empty fields (e.g. no memo) in the middle
+      jq -rn --argjson u "$unsynced" --argjson p "$new_pending" '
+        ($u | map(. + {kind: "unsynced"})) + ($p | map(. + {kind: "pending"}))
+        | .[] | "\(.kind)\t\(.bookingDate[:10] // .bookingDate)\t\(.amount * 100 | round / 100)\t\(.name // "Unknown")\t\(.purpose // "")"
+      ' | while IFS=$'\t' read -r kind date amount payee memo; do
         local marker=""
-        [ "$is_booked" = true ] || marker=" $(dim "[pending]")"
+        [ "$kind" = pending ] && marker=" $(dim "[pending]")"
         env LC_NUMERIC=C printf "  %-12s %-10.2f %-28s %s%s\n" "$date" "$amount" "${payee:0:28}" "${memo:0:40}" "$marker"
       done
       echo ""
@@ -748,21 +754,19 @@ cmd_sync() {
 
     # Build YNAB payload
     local payload
-    payload=$(echo "$filtered" | jq --arg acct "$ynab_account_id" '{
-      transactions: [.[] | {
+    payload=$(jq -n --argjson u "$unsynced" --argjson p "$new_pending" --arg acct "$ynab_account_id" '
+      def ynab_transaction: {
         account_id: $acct,
         date: (.bookingDate[:10] // .bookingDate),
         amount: ((.amount * 1000) | round),
         payee_name: (.name // "Unknown"),
         memo: (.purpose // "")
-      } + if .booked then {
-        cleared: "cleared",
-        import_id: ("tx_" + (.id | tostring))
-      } else {
+      };
+      {transactions: (
+        ($u | map(ynab_transaction + {cleared: "cleared", import_id: ("tx_" + (.id | tostring))}))
         # No import_id, so YNAB matches the booked version to it later
-        cleared: "uncleared"
-      } end]
-    }')
+        + ($p | map(ynab_transaction + {cleared: "uncleared"}))
+      )}')
 
     # POST to YNAB
     local response
@@ -780,9 +784,9 @@ cmd_sync() {
     echo "$(green "✓") $created created, $duplicates duplicates skipped."
     total_synced=$((total_synced + created))
 
-    # Mark synced booked transactions in MoneyMoney (pending ones are deduped via YNAB)
+    # Mark the Unsynced Transactions as synced (pending ones are deduped via YNAB)
     local marked
-    marked=$(echo "$booked" | jq -r '.[].id' | mm_mark_synced "$SYNC_CATEGORY_UUID")
+    marked=$(echo "$unsynced" | jq -r '.[].id' | mm_mark_synced "$SYNC_CATEGORY_UUID")
 
     echo "$(green "✓") $marked transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
     echo ""
@@ -847,21 +851,20 @@ cmd_status() {
     fi
 
     # Count synced transactions by checking the Sync Category in MoneyMoney
-    local synced_count=0 total_count=0 transactions_json export_rc=0 export_err="$FLUSSO_TMP/export.err"
+    local synced_count=0 unsynced_count=0 transactions_json export_rc=0 export_err="$FLUSSO_TMP/export.err"
     transactions_json=$(mm_export_transactions "$mm_acct" "$start_date" 2>"$export_err") || export_rc=$?
     [ "$export_rc" -eq "$MM_INVALID_INPUT" ] && die "$(cat "$export_err")"
     if [ "$export_rc" -eq 0 ]; then
-      total_count=$(echo "$transactions_json" | jq 'map(select(.booked == true)) | length')
-      synced_count=$(echo "$transactions_json" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
-        map(select(.booked == true and .categoryUuid == $cat_uuid)) | length
-      ')
+      local classified
+      classified=$(echo "$transactions_json" | mm_classify_transactions "$SYNC_CATEGORY_UUID")
+      synced_count=$(echo "$classified" | jq '.synced | length')
+      unsynced_count=$(echo "$classified" | jq '.unsynced | length')
     fi
 
-    local unsynced=$((total_count - synced_count))
     printf "  %-25s %s synced, %s unsynced  %s\n" \
       "$(bold "$name")" \
       "$(green "$synced_count")" \
-      "$unsynced" \
+      "$unsynced_count" \
       "$(dim "since $start_date")"
   done
 

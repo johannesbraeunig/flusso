@@ -281,3 +281,19 @@ load test_helper
   [[ "$output" == *"Error: Could not parse plist data."* ]] || false
   [ "$(posted_transactions | jq -r '.[].import_id')" = "tx_301" ]
 }
+
+@test "sync --dry-run --include-pending marks Pending Transactions in the list" {
+  write_config
+  {
+    mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" ""
+    mm_tx 401 2026-04-05 -9.99 false "" "Cafe" ""
+  } | mm_has_transactions
+  ynab_has_transactions "$YNAB_CHECKING" '[]'
+
+  run "$FLUSSO" sync --dry-run --include-pending
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -F "Supermarket GmbH" <<< "$output" | grep -c "\[pending\]")" -eq 0 ]
+  [ "$(grep -F "Cafe" <<< "$output" | grep -c "\[pending\]")" -eq 1 ]
+  [ "$(posted_transactions)" = "[]" ]
+}
