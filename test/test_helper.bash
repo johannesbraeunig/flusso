@@ -1,5 +1,8 @@
 # Shared setup for flusso tests: isolated HOME, fake osascript/curl on PATH,
 # and builders for MoneyMoney and YNAB fixtures.
+#
+# macOS runs bats under bash 3.2, where a failing `[[ ]]` doesn't fail the test
+# unless it's the last line. Always write `[[ ... ]] || false`.
 
 FLUSSO="$BATS_TEST_DIRNAME/../flusso"
 SYNC_CATEGORY_UUID="11111111-2222-3333-4444-555555555555"

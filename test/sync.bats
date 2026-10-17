@@ -10,7 +10,7 @@ load test_helper
   run "$FLUSSO" sync
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1 created, 0 duplicates skipped."* ]]
+  [[ "$output" == *"1 created, 0 duplicates skipped."* ]] || false
   [ "$(posted_transactions)" = "$(jq -n --arg acct "$YNAB_CHECKING" '[{
     account_id: $acct,
     date: "2026-04-03",
@@ -34,7 +34,7 @@ load test_helper
   run "$FLUSSO" sync
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1 new transaction(s) found."* ]]
+  [[ "$output" == *"1 new transaction(s) found."* ]] || false
   [ "$(posted_transactions | jq -r '.[].import_id')" = "tx_102" ]
   [ "$(marked_as_synced)" = "102" ]
 }
@@ -46,7 +46,7 @@ load test_helper
   run "$FLUSSO" sync
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"No new transactions."* ]]
+  [[ "$output" == *"No new transactions."* ]] || false
   [ "$(posted_transactions)" = "[]" ]
   [ -z "$(marked_as_synced)" ]
 }
@@ -61,9 +61,9 @@ load test_helper
   run "$FLUSSO" sync --dry-run
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"2026-04-03"*"-42.50"*"Supermarket GmbH"*"Groceries"* ]]
-  [[ "$output" == *"2026-04-04"*"3500.00"*"Employer Inc"*"Salary April"* ]]
-  [[ "$output" == *"Dry run complete. 2 transaction(s) would be synced."* ]]
+  [[ "$output" == *"2026-04-03"*"-42.50"*"Supermarket GmbH"*"Groceries"* ]] || false
+  [[ "$output" == *"2026-04-04"*"3500.00"*"Employer Inc"*"Salary April"* ]] || false
+  [[ "$output" == *"Dry run complete. 2 transaction(s) would be synced."* ]] || false
   [ "$(posted_transactions)" = "[]" ]
   [ -z "$(marked_as_synced)" ]
 }
@@ -108,7 +108,7 @@ load test_helper
   run "$FLUSSO" sync
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Error: Could not export from MoneyMoney."*"MoneyMoney fake has no export-transactions response"* ]]
+  [[ "$output" == *"Error: Could not export from MoneyMoney."*"MoneyMoney fake has no export-transactions response"* ]] || false
   [ "$(posted_transactions | jq -c '[.[] | {account_id, import_id}]')" = '[{"account_id":"ynab-savings","import_id":"tx_301"}]' ]
   [ "$(marked_as_synced)" = "301" ]
 }
@@ -120,7 +120,7 @@ load test_helper
   run "$FLUSSO" sync
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"No new transactions."* ]]
+  [[ "$output" == *"No new transactions."* ]] || false
   # Not even the YNAB lookup for the pending dedup happens
   [ "$(ynab_requests)" = "[]" ]
 }
@@ -137,7 +137,7 @@ load test_helper
   run "$FLUSSO" sync --include-pending
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"2 new transaction(s) found (1 pending)."* ]]
+  [[ "$output" == *"2 new transaction(s) found (1 pending)."* ]] || false
   [ "$(posted_transactions | jq -c '.[] | select(.payee_name == "Cafe")')" = "$(jq -cn --arg acct "$YNAB_CHECKING" '{
     account_id: $acct, date: "2026-04-05", amount: -9990, payee_name: "Cafe", memo: "Card payment", cleared: "uncleared"
   }')" ]
@@ -175,7 +175,7 @@ load test_helper
   run "$FLUSSO" sync --include-pending
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1 new transaction(s) found (1 pending)."* ]]
+  [[ "$output" == *"1 new transaction(s) found (1 pending)."* ]] || false
   [ "$(posted_transactions | jq -c '[.[] | {cleared, has_import_id: has("import_id")}]')" = \
     '[{"cleared":"uncleared","has_import_id":false}]' ]
 }
@@ -188,7 +188,7 @@ load test_helper
   run "$FLUSSO" sync --include-pending
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"No new transactions."* ]]
+  [[ "$output" == *"No new transactions."* ]] || false
   [ "$(posted_transactions)" = "[]" ]
 }
 
@@ -203,7 +203,7 @@ load test_helper
   run "$FLUSSO" sync
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Adjustment of 152.30 posted."* ]]
+  [[ "$output" == *"Adjustment of 152.30 posted."* ]] || false
   [ "$(posted_transactions)" = "$(jq -n --arg today "$today" '[{
     account_id: "ynab-brokerage",
     date: $today,
@@ -213,7 +213,7 @@ load test_helper
     cleared: "cleared",
     import_id: "FLUSSO:BAL:\($today):152300"
   }]')" ]
-  [[ "$output" == *"1 balance adjustment(s) posted."* ]]
+  [[ "$output" == *"1 balance adjustment(s) posted."* ]] || false
 }
 
 @test "Balance Sync posts nothing when the balances match" {
@@ -224,6 +224,6 @@ load test_helper
   run "$FLUSSO" sync
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Balance up to date."* ]]
+  [[ "$output" == *"Balance up to date."* ]] || false
   [ "$(posted_transactions)" = "[]" ]
 }
