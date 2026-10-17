@@ -4,7 +4,7 @@ set -euo pipefail
 # Flusso — MoneyMoney → YNAB Sync CLI
 # https://github.com/johannesbraeunig/flusso
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 # Temp files live in a directory of this run only, removed on exit
 FLUSSO_TMP=$(mktemp -d "${TMPDIR:-/tmp}/flusso.XXXXXX")
