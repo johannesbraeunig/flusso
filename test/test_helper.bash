@@ -8,8 +8,9 @@ FLUSSO="$BATS_TEST_DIRNAME/../flusso"
 SYNC_CATEGORY_UUID="11111111-2222-3333-4444-555555555555"
 BUDGET_ID="budget-1"
 YNAB_CHECKING="ynab-checking"
+YNAB_BROKERAGE="ynab-brokerage"
 # Account Mapping of a Brokerage Account in Balance Sync
-BROKERAGE_MAPPING='{"name": "Brokerage", "moneymoney_account": "123456789", "ynab_account_id": "ynab-brokerage", "mode": "balance"}'
+BROKERAGE_MAPPING="{\"name\": \"Brokerage\", \"moneymoney_account\": \"123456789\", \"ynab_account_id\": \"$YNAB_BROKERAGE\", \"mode\": \"balance\"}"
 
 setup() {
   export HOME="$BATS_TEST_TMPDIR/home"
@@ -140,6 +141,31 @@ mm_has_accounts() {
   { echo "<array>"; cat; echo "</array>"; } | plist_document > "$FAKE_DIR/mm/export-accounts.plist"
 }
 
+# mm_category NAME UUID [GROUP]
+# Prints one category <dict> as MoneyMoney's "export categories" does (with icon blob).
+mm_category() {
+  cat <<EOF
+	<dict>
+		<key>group</key>
+		<${3:-false}/>
+		<key>icon</key>
+		<data>
+		iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk
+		</data>
+		<key>name</key>
+		<string>$(xml_escape "$1")</string>
+		<key>uuid</key>
+		<string>$2</string>
+	</dict>
+EOF
+}
+
+# mm_has_categories < CATEGORY_DICTS
+# Serves the given category dicts for "export categories".
+mm_has_categories() {
+  { echo "<array>"; cat; echo "</array>"; } | plist_document > "$FAKE_DIR/mm/export-categories.plist"
+}
+
 # plist_document < PLIST_VALUE
 # Wraps a plist value in the XML prolog MoneyMoney's exports start with.
 plist_document() {
@@ -180,6 +206,56 @@ ynab_has_transactions() {
 # Serves the YNAB Account with the given balance.
 ynab_has_balance() {
   ynab_route GET "/budgets/$BUDGET_ID/accounts/$1" "{\"data\": {\"account\": {\"id\": \"$1\", \"balance\": $2}}}"
+}
+
+# ynab_has_budget
+# Serves a valid token, one budget "My Budget" ($BUDGET_ID) and its YNAB Accounts:
+# [1] Checking ($YNAB_CHECKING), [2] Brokerage ($YNAB_BROKERAGE), plus a closed one.
+ynab_has_budget() {
+  ynab_route GET /user '{"data": {"user": {"id": "user-1"}}}'
+  ynab_route GET /budgets "{\"data\": {\"budgets\": [{\"id\": \"$BUDGET_ID\", \"name\": \"My Budget\"}]}}"
+  ynab_route GET "/budgets/$BUDGET_ID/accounts" "{\"data\": {\"accounts\": [
+    {\"id\": \"$YNAB_CHECKING\", \"name\": \"Checking\", \"closed\": false, \"balance\": 1250000},
+    {\"id\": \"ynab-old\", \"name\": \"Old Account\", \"closed\": true, \"balance\": 0},
+    {\"id\": \"$YNAB_BROKERAGE\", \"name\": \"Brokerage\", \"closed\": false, \"balance\": 10000000}
+  ]}}"
+}
+
+# setup_fixtures
+# Everything setup needs: the YNAB budget and the MoneyMoney categories
+# [1] Groceries, [2] YNAB Synced (Sync Category), plus a category group.
+setup_fixtures() {
+  ynab_has_budget
+  {
+    mm_category "Everyday" group-1 true
+    mm_category "Groceries" cat-groceries
+    mm_category "YNAB Synced" "$SYNC_CATEGORY_UUID"
+  } | mm_has_categories
+}
+
+# ── Answers for interactive commands ────────────────────────
+
+# transaction_mapping_answers NAME NUMBER YNAB_INDEX [START_DATE]
+# Answers for one Account Mapping in Transaction Sync, accepting the default mode.
+transaction_mapping_answers() {
+  printf '%s\n' "$1" "$2" "" "${4:-}" "$3"
+}
+
+# balance_mapping_answers NAME NUMBER YNAB_INDEX
+# Answers for one Account Mapping of a Brokerage Account, accepting the
+# pre-selected Balance Sync (which asks no start date).
+balance_mapping_answers() {
+  printf '%s\n' "$1" "$2" "" "$3"
+}
+
+# setup_answers TOKEN START_DATE CATEGORY_INDEX MAPPING_ANSWERS_COMMAND...
+# Answers for a full setup with budget [1] and one Account Mapping.
+setup_answers() {
+  local token="$1" start_date="$2" category="$3"
+  shift 3
+  printf '%s\n' "$token" 1 "$start_date"
+  "$@"
+  printf '%s\n' n "$category"
 }
 
 # ── Call logs ───────────────────────────────────────────────
