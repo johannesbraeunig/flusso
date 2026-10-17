@@ -1,12 +1,13 @@
 ---
 # flusso-cp3l
 title: Deepen MoneyMoney access and transaction classification
-status: todo
+status: completed
 type: feature
+priority: normal
 tags:
     - ready-for-agent
 created_at: 2026-10-17T09:14:02Z
-updated_at: 2026-10-17T09:14:02Z
+updated_at: 2026-10-17T09:39:18Z
 ---
 
 ## Problem Statement
@@ -95,3 +96,14 @@ Users see no change in behaviour or output. As the maintainer, I get an automate
 - Terms follow GLOSSARY.md: Synced/Unsynced/Pending Transaction, Sync Category, mark as synced, MoneyMoney Account, Account Mapping, Transaction Sync, Balance Sync, Balance Adjustment.
 - Fixture plists should be taken from real MoneyMoney exports with personal data replaced. The single-object vs array shape and the date elements must both be represented.
 - This came out of a codebase-design review (deep modules). Candidates 1 and 2 were picked because they offer the most leverage and locality.
+
+## Summary of Changes
+
+Delivered through five child tickets (flusso-8yx9, flusso-odqj, flusso-pons, flusso-9via, flusso-qo8n):
+
+- bats suite at the CLI seam with fake osascript/curl on PATH (`make test`, 30 tests, each mutation-verified)
+- MoneyMoney module (`mm_*`) owns all AppleScript, one plist conversion, validated and normalized transaction exports with named exit codes
+- mm_classify_transactions is the only place deciding Synced / Unsynced / Pending
+- status validates account number and start date like sync
+
+Found along the way: [[ ]] assertions were no-ops under bash 3.2 (fixed), and concurrent flusso runs could delete each other's temp files (fixed with a per-run temp directory).
