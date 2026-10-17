@@ -343,3 +343,72 @@ load test_helper
   [ "$status" -eq 1 ]
   [[ "$output" == *"Error: Invalid Account Mapping in"* ]] || false
 }
+
+@test "sync reports a failed YNAB request, marks nothing as synced and continues with the next Account Mapping" {
+  write_config '[
+    {"name": "Checking", "moneymoney_account": "DE001", "ynab_account_id": "ynab-checking"},
+    {"name": "Savings", "moneymoney_account": "DE002", "ynab_account_id": "ynab-savings"}
+  ]'
+  mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" "Groceries" | mm_has_transactions DE001
+  mm_tx 301 2026-04-03 100 true "" "Transfer" "" | mm_has_transactions DE002
+  # No POST route, so every YNAB request fails
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "Error: YNAB API request failed." <<< "$output")" -eq 2 ]
+  [ "$(posted_transactions | jq -c '[.[] | {account_id, import_id}]')" = '[{"account_id":"ynab-checking","import_id":"tx_101"},{"account_id":"ynab-savings","import_id":"tx_301"}]' ]
+  [ -z "$(marked_as_synced)" ]
+  [[ "$output" == *"Sync complete. 0 transaction(s) synced."* ]] || false
+}
+
+@test "Balance Sync reports a Balance Adjustment already imported today as skipped" {
+  write_config "[$BROKERAGE_MAPPING]"
+  mm_account 123456789 10152.3 true | mm_has_accounts
+  ynab_has_balance ynab-brokerage 10000000
+  ynab_accepts_transactions 0 1
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Adjustment of 152.30 was already imported today, skipped."* ]] || false
+  [[ "$output" != *"balance adjustment(s) posted."* ]] || false
+}
+
+@test "sync totals Transaction Sync and Balance Sync mappings in its summary" {
+  write_config "[
+    {\"name\": \"Checking\", \"moneymoney_account\": \"DE001\", \"ynab_account_id\": \"$YNAB_CHECKING\"},
+    $BROKERAGE_MAPPING
+  ]"
+  {
+    mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" "Groceries"
+    mm_tx 102 2026-04-04 -9.99 true "" "Streaming Service" ""
+  } | mm_has_transactions DE001
+  mm_account 123456789 10152.3 true | mm_has_accounts
+  ynab_has_balance ynab-brokerage 10000000
+  ynab_accepts_transactions 2
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Sync complete. 2 transaction(s) synced. 1 balance adjustment(s) posted."* ]] || false
+}
+
+@test "sync --dry-run totals Transaction Sync and Balance Sync mappings in its summary" {
+  write_config "[
+    {\"name\": \"Checking\", \"moneymoney_account\": \"DE001\", \"ynab_account_id\": \"$YNAB_CHECKING\"},
+    $BROKERAGE_MAPPING
+  ]"
+  {
+    mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" "Groceries"
+    mm_tx 102 2026-04-04 -9.99 true "" "Streaming Service" ""
+  } | mm_has_transactions DE001
+  mm_account 123456789 10152.3 true | mm_has_accounts
+  ynab_has_balance ynab-brokerage 10000000
+
+  run "$FLUSSO" sync --dry-run
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Dry run complete. 2 transaction(s) would be synced. 1 balance adjustment(s) would be posted."* ]] || false
+  [ "$(posted_transactions)" = "[]" ]
+}

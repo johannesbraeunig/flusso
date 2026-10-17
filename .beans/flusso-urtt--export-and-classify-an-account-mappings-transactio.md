@@ -1,0 +1,34 @@
+---
+# flusso-urtt
+title: Export and classify an Account Mapping's transactions in one place
+status: todo
+type: task
+tags:
+    - ready-for-agent
+created_at: 2026-10-17T10:21:11Z
+updated_at: 2026-10-17T10:21:11Z
+parent: flusso-4ctd
+blocked_by:
+    - flusso-nyi0
+---
+
+## Parent
+
+flusso-4ctd: Deepen Transaction Sync into its own module
+
+## What to build
+
+One module that exports a Transaction Sync mapping's transactions from MoneyMoney and classifies them into Synced, Unsynced and Pending Transactions. It owns the policy for what a MoneyMoney export failure means:
+
+- invalid input (account number or start date) stops the run
+- a failed or unparseable export comes back to the caller as a failure, with its reason and its kind (export failed / couldn't parse)
+
+Sync turns those failures into its existing messages and moves on to the next Account Mapping. Status turns them into zero counts. The exit-code handling status keeps today goes away. AppleScript access stays in the `mm_*` functions. Users see no change.
+
+## Acceptance criteria
+
+- [ ] One module exports and classifies a mapping's transactions and owns the export-failure policy
+- [ ] Sync and status both use it; neither maps MoneyMoney export exit codes itself
+- [ ] Sync still prints the existing "Could not export from MoneyMoney" hint and the parse error, then continues with the next Account Mapping
+- [ ] Status still shows "0 synced, 0 unsynced" for a mapping whose export fails or can't be parsed, and stops on invalid input
+- [ ] The full bats suite passes unmodified
