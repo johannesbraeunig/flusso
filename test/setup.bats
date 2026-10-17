@@ -21,6 +21,19 @@ load test_helper
   [ "$(stat -f '%Lp' "$HOME/.flusso/config.json")" = 600 ]
 }
 
+@test "setup makes an existing readable config private again" {
+  write_config
+  chmod 644 "$HOME/.flusso/config.json"
+  chmod 755 "$HOME/.flusso"
+  setup_fixtures
+
+  run "$FLUSSO" setup < <(setup_answers test-token 2026-04-01 2 transaction_mapping_answers Checking DE001 1)
+
+  [ "$status" -eq 0 ]
+  [ "$(stat -f '%Lp' "$HOME/.flusso")" = 700 ]
+  [ "$(stat -f '%Lp' "$HOME/.flusso/config.json")" = 600 ]
+}
+
 @test "setup offers only open YNAB Accounts and non-group categories" {
   setup_fixtures
 

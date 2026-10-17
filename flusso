@@ -63,6 +63,13 @@ check_deps() {
   done
 }
 
+# Write stdin to FILE readable by the owner only, also when FILE already exists
+# (umask only applies to newly created files)
+write_private() {
+  (umask 077 && cat > "$1")
+  chmod 600 "$1"
+}
+
 # Format YNAB milliunits as a decimal amount (e.g. -12340 → -12.34)
 fmt_milliunits() {
   env LC_NUMERIC=C printf "%.2f" "$(echo "scale=3; $1 / 1000" | bc)"
@@ -435,7 +442,7 @@ cmd_setup() {
     --argjson accounts "$ACCOUNTS_JSON" \
     '{api_token: $token, budget_id: $budget, start_date: $start, sync_category: {uuid: $cat_uuid, name: $cat_name}, accounts: $accounts}')
 
-  (umask 077 && echo "$config" > "$CONFIG_FILE")
+  echo "$config" | write_private "$CONFIG_FILE"
   echo "$(green "✓") Config written: $CONFIG_FILE"
 
   echo ""
@@ -463,7 +470,7 @@ cmd_reset() {
       y|Y|yes|Yes) ;;
       *) echo "Aborted. Nothing was changed."; exit 0 ;;
     esac
-    (umask 077 && cp "$CONFIG_FILE" "$backup")
+    write_private "$backup" < "$CONFIG_FILE"
     echo "$(green "✓") Backed up existing config to $backup"
   else
     echo "No existing configuration found at $CONFIG_FILE."
@@ -509,7 +516,7 @@ cmd_add() {
     [.accounts[].moneymoney_account] as $existing
     | .accounts += [$new[] | select(.moneymoney_account as $a | $existing | index($a) | not)]
   ' "$CONFIG_FILE")
-  (umask 077 && echo "$updated" > "$CONFIG_FILE")
+  echo "$updated" | write_private "$CONFIG_FILE"
 
   echo "$(green "✓") Config updated: $CONFIG_FILE"
   echo ""

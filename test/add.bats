@@ -17,6 +17,18 @@ load test_helper
   [ "$(jq -r '.api_token' "$HOME/.flusso/config.json")" = "test-token" ]
 }
 
+@test "add makes an existing readable config private again" {
+  write_config
+  chmod 644 "$HOME/.flusso/config.json"
+  ynab_has_budget
+  mm_account 123456789 10000 true | mm_has_accounts
+
+  run "$FLUSSO" add < <(balance_mapping_answers Brokerage 123456789 2; echo n)
+
+  [ "$status" -eq 0 ]
+  [ "$(stat -f '%Lp' "$HOME/.flusso/config.json")" = 600 ]
+}
+
 @test "add skips a MoneyMoney Account that is already configured and adds the new one" {
   write_config
   local existing

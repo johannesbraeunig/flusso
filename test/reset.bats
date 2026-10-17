@@ -19,6 +19,20 @@ new_setup_answers() {
   [ "$(jq -r '.api_token + " " + .start_date' "$HOME/.flusso/config.json")" = "new-token 2026-05-01" ]
 }
 
+@test "reset keeps the backup and the new config private" {
+  write_config
+  chmod 644 "$HOME/.flusso/config.json"
+  echo "{}" > "$HOME/.flusso/config.json.bak"
+  chmod 644 "$HOME/.flusso/config.json.bak"
+  setup_fixtures
+
+  run "$FLUSSO" reset < <(printf 'y\n'; new_setup_answers)
+
+  [ "$status" -eq 0 ]
+  [ "$(stat -f '%Lp' "$HOME/.flusso/config.json.bak")" = 600 ]
+  [ "$(stat -f '%Lp' "$HOME/.flusso/config.json")" = 600 ]
+}
+
 @test "reset changes nothing when not confirmed" {
   write_config
   local old_config
