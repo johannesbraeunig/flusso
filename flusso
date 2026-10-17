@@ -719,7 +719,7 @@ cmd_sync() {
     echo "$(green "✓") $created created, $duplicates duplicates skipped."
     total_synced=$((total_synced + created))
 
-    # Categorize synced booked transactions in MoneyMoney (pending ones are deduped via YNAB)
+    # Mark synced booked transactions in MoneyMoney (pending ones are deduped via YNAB)
     local tx_ids
     tx_ids=$(echo "$booked" | jq -r '.[].id')
     local labeled=0
@@ -736,7 +736,7 @@ cmd_sync() {
       fi
     done
 
-    echo "$(green "✓") $labeled transaction(s) categorized as \"$SYNC_CATEGORY_NAME\"."
+    echo "$(green "✓") $labeled transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
     echo ""
   done
 
@@ -821,11 +821,11 @@ cmd_status() {
       fi
     fi
 
-    local pending=$((total_count - synced_count))
-    printf "  %-25s %s synced, %s pending  %s\n" \
+    local unsynced=$((total_count - synced_count))
+    printf "  %-25s %s synced, %s unsynced  %s\n" \
       "$(bold "$name")" \
       "$(green "$synced_count")" \
-      "$pending" \
+      "$unsynced" \
       "$(dim "since $start_date")"
   done
 
