@@ -189,6 +189,18 @@ load_config() {
   fi
 }
 
+# Print the configured Account Mappings, one per line, with defaults resolved:
+# name, MoneyMoney account, YNAB account id, mode, start date (separated by \x1f)
+account_mappings() {
+  jq -r --arg global_start "$GLOBAL_START_DATE" '.accounts[] | [
+    .name,
+    .moneymoney_account,
+    .ynab_account_id,
+    (.mode // "transactions"),
+    (if (.start_date // "") == "" then $global_start else .start_date end)
+  ] | join("\u001f")' "$CONFIG_FILE"
+}
+
 # ── YNAB API ─────────────────────────────────────────────────
 
 ynab_get() {
@@ -675,14 +687,8 @@ cmd_sync() {
   local total_adjusted=0
   local mm_accounts=""
 
-  for i in $(seq 0 $((account_count - 1))); do
-    local name mm_acct ynab_account_id account_start_date start_date mode
-    name=$(jq -r ".accounts[$i].name" "$CONFIG_FILE")
-    mm_acct=$(jq -r ".accounts[$i].moneymoney_account" "$CONFIG_FILE")
-    ynab_account_id=$(jq -r ".accounts[$i].ynab_account_id" "$CONFIG_FILE")
-    account_start_date=$(jq -r ".accounts[$i].start_date // empty" "$CONFIG_FILE")
-    start_date="${account_start_date:-$GLOBAL_START_DATE}"
-    mode=$(jq -r ".accounts[$i].mode // \"transactions\"" "$CONFIG_FILE")
+  local name mm_acct ynab_account_id mode start_date
+  while IFS=$'\x1f' read -r -u 3 name mm_acct ynab_account_id mode start_date; do
 
     # Filter by account name if specified
     if [ -n "$filter_account" ] && [ "$filter_account" != "$name" ]; then
@@ -814,7 +820,7 @@ cmd_sync() {
 
     echo "$(green "✓") $marked transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
     echo ""
-  done
+  done 3< <(account_mappings)
 
   local adjusted_note=""
   if [ "$dry_run" = true ]; then
@@ -846,17 +852,11 @@ cmd_status() {
 
   local mm_accounts=""
 
-  for i in $(seq 0 $((account_count - 1))); do
-    local name mm_acct account_start start_date mode
-    name=$(jq -r ".accounts[$i].name" "$CONFIG_FILE")
-    mm_acct=$(jq -r ".accounts[$i].moneymoney_account" "$CONFIG_FILE")
-    account_start=$(jq -r ".accounts[$i].start_date // empty" "$CONFIG_FILE")
-    start_date="${account_start:-$GLOBAL_START_DATE}"
-    mode=$(jq -r ".accounts[$i].mode // \"transactions\"" "$CONFIG_FILE")
+  local name mm_acct ynab_account_id mode start_date
+  while IFS=$'\x1f' read -r -u 3 name mm_acct ynab_account_id mode start_date; do
 
     if [ "$mode" = "balance" ]; then
-      local ynab_account_id balances mm_balance ynab_balance diff state
-      ynab_account_id=$(jq -r ".accounts[$i].ynab_account_id" "$CONFIG_FILE")
+      local balances mm_balance ynab_balance diff state
       [ -z "$mm_accounts" ] && { mm_accounts=$(mm_export_accounts 2>/dev/null) || mm_accounts="[]"; }
 
       if ! balances=$(balance_diff "$mm_acct" "$ynab_account_id" "$mm_accounts" 2>/dev/null); then
@@ -889,7 +889,7 @@ cmd_status() {
       "$(green "$synced_count")" \
       "$unsynced_count" \
       "$(dim "since $start_date")"
-  done
+  done 3< <(account_mappings)
 
   echo ""
 }

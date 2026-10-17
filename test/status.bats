@@ -140,3 +140,13 @@ status_line_for() {
   [[ "$output" == *"Error: Invalid date format: April (expected YYYY-MM-DD)"* ]] || false
   [ -z "$(transaction_exports)" ]
 }
+
+@test "status falls back to the global start date when an Account Mapping's start date is empty" {
+  write_config '[{"name": "Checking", "moneymoney_account": "DE001", "ynab_account_id": "ynab-checking", "start_date": ""}]'
+  mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" "" | mm_has_transactions
+
+  run "$FLUSSO" status
+
+  [ "$status" -eq 0 ]
+  [ "$(transaction_exports)" = "DE001 2026-04-01" ]
+}
