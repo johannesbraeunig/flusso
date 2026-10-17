@@ -23,6 +23,8 @@ All MoneyMoney access (AppleScript, plist conversion, marking as synced) lives i
 
 Each synced transaction gets assigned a configurable MoneyMoney category (e.g. "YNAB Synced"). On next sync, transactions with this category are skipped. YNAB also deduplicates via `import_id`.
 
+Syncing pending transactions is always opt-in: off by default, enabled only by `include_pending: true` or `--include-pending`. Never turn it on by default, in `setup`/`add`, or implicitly.
+
 Optional pending transactions (`include_pending` / `--include-pending`) are the exception: MoneyMoney replaces them on booking, so they aren't categorized. They're posted as uncleared without `import_id` and deduped against YNAB (same date + amount); YNAB later matches the booked version to them.
 
 ### Key dependencies
