@@ -230,6 +230,18 @@ ynab_post() {
   return $rc
 }
 
+# Create transactions in YNAB from a create-transactions payload (one
+# "transaction" or many "transactions"). Prints "CREATED DUPLICATES", or
+# prints the response and fails if the request failed.
+ynab_create_transactions() {
+  local response
+  if ! response=$(ynab_post "/budgets/$BUDGET_ID/transactions" "$1" 2>&1); then
+    echo "$response"
+    return 1
+  fi
+  echo "$response" | jq -r '"\(.data.transaction_ids // [] | length) \(.data.duplicate_import_ids // [] | length)"'
+}
+
 # ── Account mapping (shared by setup and add) ──────────────
 
 # Interactively map MoneyMoney accounts to YNAB accounts.
@@ -612,14 +624,15 @@ sync_balance() {
         import_id: ("FLUSSO:BAL:" + $date + ":" + ($amount | tostring))
       }}')
 
-  local response
-  if ! response=$(ynab_post "/budgets/$BUDGET_ID/transactions" "$payload" 2>&1); then
+  local result duplicates
+  if ! result=$(ynab_create_transactions "$payload"); then
     echo "$(red "Error:") YNAB API request failed."
-    echo "$(dim "$response")"
+    echo "$(dim "$result")"
     return 1
   fi
 
-  if [ "$(echo "$response" | jq '.data.duplicate_import_ids // [] | length')" -gt 0 ]; then
+  read -r _ duplicates <<< "$result"
+  if [ "$duplicates" -gt 0 ]; then
     echo "$(dim "Adjustment of $(fmt_milliunits "$diff") was already imported today, skipped.")"
     return 0
   fi
@@ -807,17 +820,14 @@ cmd_sync() {
       )}')
 
     # POST to YNAB
-    local response
-    if ! response=$(ynab_post "/budgets/$BUDGET_ID/transactions" "$payload" 2>&1); then
+    local result created duplicates
+    if ! result=$(ynab_create_transactions "$payload"); then
       echo "$(red "Error:") YNAB API request failed."
-      echo "$(dim "$response")"
+      echo "$(dim "$result")"
       echo ""
       continue
     fi
-
-    local created duplicates
-    created=$(echo "$response" | jq '.data.transaction_ids // [] | length')
-    duplicates=$(echo "$response" | jq '.data.duplicate_import_ids // [] | length')
+    read -r created duplicates <<< "$result"
 
     echo "$(green "✓") $created created, $duplicates duplicates skipped."
     total_synced=$((total_synced + created))
