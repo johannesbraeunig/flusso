@@ -37,3 +37,17 @@ Each synced transaction gets assigned a configurable MoneyMoney category (e.g. "
 **IMPORTANT**: Before you do anything else, run the `beans prime` command and heed its output.
 
 Uses [beans](https://github.com/hmans/beans) for local task management. Config in `.beans.yml`, tasks stored in `.beans/`. Task IDs are prefixed with `flusso-`. Use beans instead of TodoWrite for all work tracking.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as beans in `.beans/` (local, managed via the `beans` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary, applied as bean tags. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
