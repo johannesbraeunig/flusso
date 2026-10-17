@@ -255,3 +255,29 @@ load test_helper
   [ "$status" -eq 0 ]
   [ -z "$(ls -A "$TMPDIR")" ]
 }
+
+@test "sync rejects an invalid account number before calling MoneyMoney" {
+  write_config '[{"name": "Checking", "moneymoney_account": "DE001\" & (do shell script \"id\") & \"", "ynab_account_id": "ynab-checking"}]'
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Error: Invalid account identifier: DE001"* ]] || false
+  [ -z "$(transaction_exports)" ]
+}
+
+@test "sync reports a MoneyMoney export it can't parse and continues with the next Account Mapping" {
+  write_config '[
+    {"name": "Checking", "moneymoney_account": "DE001", "ynab_account_id": "ynab-checking"},
+    {"name": "Savings", "moneymoney_account": "DE002", "ynab_account_id": "ynab-savings"}
+  ]'
+  mm_export_is_garbled DE001
+  mm_tx 301 2026-04-03 100 true "" "Transfer" "" | mm_has_transactions DE002
+  ynab_accepts_transactions 1
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Error: Could not parse plist data."* ]] || false
+  [ "$(posted_transactions | jq -r '.[].import_id')" = "tx_301" ]
+}

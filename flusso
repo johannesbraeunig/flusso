@@ -40,14 +40,19 @@ die() {
   exit 1
 }
 
-validate_account_id() {
-  [ -n "$1" ] || die "Account identifier is empty."
-  # Only allow alphanumeric, spaces, and * (masked credit card numbers)
-  [[ "$1" =~ ^[A-Za-z0-9*\ ]+$ ]] || die "Invalid account identifier: $1"
+# Only allow alphanumeric, spaces, and * (masked credit card numbers)
+is_valid_account_id() {
+  [[ "$1" =~ ^[A-Za-z0-9*\ ]+$ ]]
+}
+
+# Print why a date is invalid and fail, or succeed silently
+check_date() {
+  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "Invalid date format: $1 (expected YYYY-MM-DD)"; return 1; }
 }
 
 validate_date() {
-  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "Invalid date format: $1 (expected YYYY-MM-DD)"
+  local problem
+  problem=$(check_date "$1") || die "$problem"
 }
 
 check_deps() {
@@ -65,16 +70,88 @@ fmt_milliunits() {
 
 # ── MoneyMoney ───────────────────────────────────────────────
 
+# All AppleScript access to MoneyMoney lives here.
+
+# Convert a MoneyMoney plist export (stdin) to JSON
+mm_plist_to_json() {
+  # Icons are base64 <data> blobs and dates aren't supported by plutil's JSON output
+  perl -0777 -pe 's|<data>\s*[^<]*</data>|<string>ICON</string>|gs' \
+    | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' \
+    | plutil -convert json -o - -
+}
+
 # Export all MoneyMoney accounts (excluding groups) as JSON
 mm_export_accounts() {
   local plist
   plist=$(osascript -e 'tell application "MoneyMoney" to export accounts' 2>&1) || return 1
-  # Icons are base64 <data> blobs and dates aren't supported by plutil's JSON output
-  echo "$plist" \
-    | perl -0777 -pe 's|<data>\s*[^<]*</data>|<string>ICON</string>|gs' \
-    | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' \
-    | plutil -convert json -o - - \
-    | jq '[.[] | select(.group == false)]'
+  echo "$plist" | mm_plist_to_json | jq '[.[] | select(.group == false)]'
+}
+
+# Export all MoneyMoney categories (excluding groups) as JSON
+mm_export_categories() {
+  local plist
+  plist=$(osascript -e 'tell application "MoneyMoney" to export categories' 2>&1) || return 1
+  echo "$plist" | mm_plist_to_json | jq '[.[] | select(.group == false)]'
+}
+
+# Exit codes of mm_export_transactions
+MM_EXPORT_FAILED=1
+MM_PARSE_FAILED=2
+MM_INVALID_INPUT=3
+
+# Export the transactions of a MoneyMoney account since START_DATE as a JSON array.
+# On failure the reason goes to stderr and the exit code is one of the MM_* codes above.
+mm_export_transactions() {
+  local account="$1" start_date="$2" problem
+
+  # Validate inputs before passing them to AppleScript
+  if [ -z "$account" ]; then
+    echo "Account identifier is empty." >&2
+    return $MM_INVALID_INPUT
+  fi
+  if ! is_valid_account_id "$account"; then
+    echo "Invalid account identifier: $account" >&2
+    return $MM_INVALID_INPUT
+  fi
+  if ! problem=$(check_date "$start_date"); then
+    echo "$problem" >&2
+    return $MM_INVALID_INPUT
+  fi
+
+  local plist errfile="$FLUSSO_TMP/osascript.err"
+  if ! plist=$(osascript \
+    -e "on run {acctIBAN, startDt}" \
+    -e "  tell application \"MoneyMoney\"" \
+    -e "    export transactions from account acctIBAN from date startDt as \"plist\"" \
+    -e "  end tell" \
+    -e "end run" \
+    -- "$account" "$start_date" 2>"$errfile"); then
+    cat "$errfile" >&2
+    return $MM_EXPORT_FAILED
+  fi
+
+  # A single transaction may come back as an object instead of a list
+  echo "$plist" | mm_plist_to_json \
+    | jq '(.transactions // .) | if type == "array" then . else [.] end' \
+    || return $MM_PARSE_FAILED
+}
+
+# Mark MoneyMoney transactions (ids on stdin, one per line) as synced by
+# assigning the Sync Category. Prints how many were marked.
+mm_mark_synced() {
+  local category_uuid="$1" marked=0 tx_id
+  while read -r tx_id; do
+    if osascript \
+      -e "on run {txId, catUUID}" \
+      -e "  tell application \"MoneyMoney\"" \
+      -e "    set transaction id (txId as integer) category to catUUID" \
+      -e "  end tell" \
+      -e "end run" \
+      -- "$tx_id" "$category_uuid" &>/dev/null; then
+      marked=$((marked + 1))
+    fi
+  done
+  echo "$marked"
 }
 
 # ── Config ───────────────────────────────────────────────────
@@ -312,18 +389,15 @@ cmd_setup() {
   echo ""
 
   # Fetch categories from MoneyMoney
-  local categories_plist categories_json category_count
-  if ! categories_plist=$(osascript -e 'tell application "MoneyMoney" to export categories' 2>&1); then
-    die "Could not fetch categories from MoneyMoney."
-  fi
-  categories_json=$(echo "$categories_plist" | perl -0777 -pe 's|<data>\s*[^<]*</data>|<string>ICON</string>|gs' | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' | plutil -convert json -o - -)
-  category_count=$(echo "$categories_json" | jq '[.[] | select(.group == false)] | length')
+  local categories_json category_count
+  categories_json=$(mm_export_categories) || die "Could not fetch categories from MoneyMoney."
+  category_count=$(echo "$categories_json" | jq 'length')
 
   echo "Available categories:"
   echo ""
   for i in $(seq 0 $((category_count - 1))); do
     local cat_name
-    cat_name=$(echo "$categories_json" | jq -r "[.[] | select(.group == false)][$i].name")
+    cat_name=$(echo "$categories_json" | jq -r ".[$i].name")
     printf "  %s  %s\n" "$(bold "[$((i + 1))]")" "$cat_name"
   done
 
@@ -334,8 +408,8 @@ cmd_setup() {
   [ "$cat_idx" -lt 0 ] || [ "$cat_idx" -ge "$category_count" ] && die "Invalid selection."
 
   local SYNC_CATEGORY_UUID SYNC_CATEGORY_NAME
-  SYNC_CATEGORY_UUID=$(echo "$categories_json" | jq -r "[.[] | select(.group == false)][$cat_idx].uuid")
-  SYNC_CATEGORY_NAME=$(echo "$categories_json" | jq -r "[.[] | select(.group == false)][$cat_idx].name")
+  SYNC_CATEGORY_UUID=$(echo "$categories_json" | jq -r ".[$cat_idx].uuid")
+  SYNC_CATEGORY_NAME=$(echo "$categories_json" | jq -r ".[$cat_idx].name")
   echo "$(green "✓") Category: $SYNC_CATEGORY_NAME"
 
   # Write config
@@ -392,7 +466,7 @@ cmd_reset() {
 # ── add ──────────────────────────────────────────────────────
 
 cmd_add() {
-  check_deps curl jq osascript plutil
+  check_deps curl jq osascript perl plutil
   load_config
 
   echo ""
@@ -512,10 +586,7 @@ new_pending_transactions() {
   local transactions_json="$1" ynab_account_id="$2" start_date="$3"
 
   local pending
-  pending=$(echo "$transactions_json" | jq '
-    (.transactions // .) | if type == "array" then . else [.] end
-    | map(select(.booked == false))
-  ')
+  pending=$(echo "$transactions_json" | jq 'map(select(.booked == false))')
   if [ "$(echo "$pending" | jq 'length')" -eq 0 ]; then
     echo "[]"
     return 0
@@ -540,7 +611,7 @@ new_pending_transactions() {
 # ── sync ─────────────────────────────────────────────────────
 
 cmd_sync() {
-  check_deps curl jq osascript plutil
+  check_deps curl jq osascript perl plutil
   load_config
 
   local dry_run=false
@@ -607,41 +678,30 @@ cmd_sync() {
       continue
     fi
 
-    # Validate inputs before passing to AppleScript
-    validate_account_id "$mm_acct"
-    validate_date "$start_date"
-
-    # Export transactions from MoneyMoney via AppleScript
-    local plist_data
-    if ! plist_data=$(osascript \
-      -e "on run {acctIBAN, startDt}" \
-      -e "  tell application \"MoneyMoney\"" \
-      -e "    export transactions from account acctIBAN from date startDt as \"plist\"" \
-      -e "  end tell" \
-      -e "end run" \
-      -- "$mm_acct" "$start_date" 2>&1); then
-      echo "$(red "Error:") Could not export from MoneyMoney."
-      echo "$(dim "Make sure MoneyMoney is running and has granted automation access.")"
-      echo "$(dim "$plist_data")"
-      echo ""
-      continue
-    fi
-
-    # Convert plist to JSON (sed converts <date> to <string> — plutil can't handle date types)
-    local transactions_json
-    if ! transactions_json=$(echo "$plist_data" | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' | plutil -convert json -o - - 2>&1); then
-      echo "$(red "Error:") Could not parse plist data."
-      echo "$(dim "$transactions_json")"
-      echo ""
-      continue
-    fi
+    local transactions_json export_rc=0 export_err="$FLUSSO_TMP/export.err"
+    transactions_json=$(mm_export_transactions "$mm_acct" "$start_date" 2>"$export_err") || export_rc=$?
+    case "$export_rc" in
+      0) ;;
+      "$MM_INVALID_INPUT") die "$(cat "$export_err")" ;;
+      "$MM_EXPORT_FAILED")
+        echo "$(red "Error:") Could not export from MoneyMoney."
+        echo "$(dim "Make sure MoneyMoney is running and has granted automation access.")"
+        echo "$(dim "$(cat "$export_err")")"
+        echo ""
+        continue
+        ;;
+      *)
+        echo "$(red "Error:") Could not parse plist data."
+        echo "$(dim "$(cat "$export_err")")"
+        echo ""
+        continue
+        ;;
+    esac
 
     # Filter: only booked transactions not yet assigned the sync category
     local booked
     booked=$(echo "$transactions_json" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
-      (.transactions // .)
-      | if type == "array" then . else [.] end
-      | map(select(
+      map(select(
           .booked == true
           and (.categoryUuid != $cat_uuid)
       ))
@@ -721,23 +781,10 @@ cmd_sync() {
     total_synced=$((total_synced + created))
 
     # Mark synced booked transactions in MoneyMoney (pending ones are deduped via YNAB)
-    local tx_ids
-    tx_ids=$(echo "$booked" | jq -r '.[].id')
-    local labeled=0
+    local marked
+    marked=$(echo "$booked" | jq -r '.[].id' | mm_mark_synced "$SYNC_CATEGORY_UUID")
 
-    for tx_id in $tx_ids; do
-      if osascript \
-        -e "on run {txId, catUUID}" \
-        -e "  tell application \"MoneyMoney\"" \
-        -e "    set transaction id (txId as integer) category to catUUID" \
-        -e "  end tell" \
-        -e "end run" \
-        -- "$tx_id" "$SYNC_CATEGORY_UUID" &>/dev/null; then
-        labeled=$((labeled + 1))
-      fi
-    done
-
-    echo "$(green "✓") $labeled transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
+    echo "$(green "✓") $marked transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
     echo ""
   done
 
@@ -754,7 +801,7 @@ cmd_sync() {
 # ── status ───────────────────────────────────────────────────
 
 cmd_status() {
-  check_deps curl jq osascript plutil
+  check_deps curl jq osascript perl plutil
   load_config
 
   echo ""
@@ -799,27 +846,15 @@ cmd_status() {
       continue
     fi
 
-    # Count synced transactions by checking labels in MoneyMoney
-    local synced_count=0 total_count=0
-    if plist_data=$(osascript \
-      -e "on run {acctIBAN, startDt}" \
-      -e "  tell application \"MoneyMoney\"" \
-      -e "    export transactions from account acctIBAN from date startDt as \"plist\"" \
-      -e "  end tell" \
-      -e "end run" \
-      -- "$mm_acct" "$start_date" 2>/dev/null); then
-
-      local json_data
-      if json_data=$(echo "$plist_data" | sed 's|<date>\(.*\)</date>|<string>\1</string>|g' | plutil -convert json -o - - 2>/dev/null); then
-        total_count=$(echo "$json_data" | jq '
-          (.transactions // .) | if type == "array" then . else [.] end
-          | map(select(.booked == true)) | length
-        ')
-        synced_count=$(echo "$json_data" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
-          (.transactions // .) | if type == "array" then . else [.] end
-          | map(select(.booked == true and .categoryUuid == $cat_uuid)) | length
-        ')
-      fi
+    # Count synced transactions by checking the Sync Category in MoneyMoney
+    local synced_count=0 total_count=0 transactions_json export_rc=0 export_err="$FLUSSO_TMP/export.err"
+    transactions_json=$(mm_export_transactions "$mm_acct" "$start_date" 2>"$export_err") || export_rc=$?
+    [ "$export_rc" -eq "$MM_INVALID_INPUT" ] && die "$(cat "$export_err")"
+    if [ "$export_rc" -eq 0 ]; then
+      total_count=$(echo "$transactions_json" | jq 'map(select(.booked == true)) | length')
+      synced_count=$(echo "$transactions_json" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
+        map(select(.booked == true and .categoryUuid == $cat_uuid)) | length
+      ')
     fi
 
     local unsynced=$((total_count - synced_count))

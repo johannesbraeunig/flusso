@@ -14,7 +14,10 @@ Flusso — a macOS CLI tool that syncs MoneyMoney transactions to YNAB.
 
 ### Sync pipeline
 
-`osascript` (AppleScript → MoneyMoney plist export) → `sed` (convert date elements) → `plutil` (plist → JSON) → `jq` (filter by booked + not in sync category) → `curl` (POST to YNAB API) → `osascript` (assign sync category to transactions)
+All MoneyMoney access (AppleScript, plist conversion, marking as synced) lives in the `mm_*` functions.
+
+
+`osascript` (AppleScript → MoneyMoney plist export) → `perl`/`sed` (strip icon data, convert date elements) → `plutil` (plist → JSON) → `jq` (filter by booked + not in sync category) → `curl` (POST to YNAB API) → `osascript` (assign sync category to transactions)
 
 ### Dedup strategy
 
@@ -24,7 +27,7 @@ Optional pending transactions (`include_pending` / `--include-pending`) are the 
 
 ### Key dependencies
 
-- `curl`, `jq`, `osascript`, `plutil` (all macOS built-ins except jq)
+- `curl`, `jq`, `osascript`, `perl`, `plutil` (all macOS built-ins except jq)
 - MoneyMoney AppleScript API: https://moneymoney.app/applescript/
 - YNAB API: https://api.ynab.com/v1
 

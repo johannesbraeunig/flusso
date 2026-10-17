@@ -120,3 +120,23 @@ status_line_for() {
   [ "$status" -eq 0 ]
   [[ "$(status_line_for "Brokerage")" == *"unavailable"* ]] || false
 }
+
+@test "status rejects an invalid account number before calling MoneyMoney" {
+  write_config '[{"name": "Checking", "moneymoney_account": "DE001\" & (do shell script \"id\") & \"", "ynab_account_id": "ynab-checking"}]'
+
+  run "$FLUSSO" status
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Error: Invalid account identifier: DE001"* ]] || false
+  [ -z "$(transaction_exports)" ]
+}
+
+@test "status rejects an invalid start date before calling MoneyMoney" {
+  write_config '[{"name": "Checking", "moneymoney_account": "DE001", "ynab_account_id": "ynab-checking", "start_date": "April"}]'
+
+  run "$FLUSSO" status
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Error: Invalid date format: April (expected YYYY-MM-DD)"* ]] || false
+  [ -z "$(transaction_exports)" ]
+}
