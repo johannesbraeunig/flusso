@@ -5,7 +5,9 @@ status: todo
 type: task
 priority: low
 created_at: 2026-10-17T09:11:12Z
-updated_at: 2026-10-17T09:11:12Z
+updated_at: 2026-10-17T09:15:10Z
+blocked_by:
+    - flusso-qo8n
 ---
 
 ADR 0001 records the Sync Category as sync state. The cost: users can't use MoneyMoney categories for anything else, and recategorizing a Synced Transaction triggers a re-sync that overwrites the user's category.
