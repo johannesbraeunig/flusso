@@ -1,12 +1,13 @@
 ---
 # flusso-4ctd
 title: Deepen Transaction Sync into its own module
-status: todo
+status: completed
 type: feature
+priority: normal
 tags:
     - ready-for-agent
 created_at: 2026-10-17T10:19:05Z
-updated_at: 2026-10-17T10:19:05Z
+updated_at: 2026-10-17T10:24:57Z
 ---
 
 ## Problem Statement
@@ -94,3 +95,7 @@ Users see no change. Every command prints the same output and has the same exit 
 
 - This came out of a codebase-design review that ranked deepening candidates. It continues the recent `balance_diff` and `account_mappings` refactors.
 - Keep the vocabulary in GLOSSARY.md (Account Mapping, Transaction Sync, Unsynced/Synced/Pending Transaction, Sync Category, Mark as synced, Balance Adjustment) in function names and comments.
+
+## Summary of Changes
+
+Done in four tickets: flusso-nyi0 (pinning tests), flusso-ygm7 (`ynab_create_transactions`), flusso-urtt (`export_classified_transactions`, shared by sync and status), flusso-e7nn (`sync_transactions`; `cmd_sync` is now a dispatcher). Behaviour is unchanged: the suite (56 tests, including 4 new pinning tests) is green.
