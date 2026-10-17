@@ -150,3 +150,13 @@ status_line_for() {
   [ "$status" -eq 0 ]
   [ "$(transaction_exports)" = "DE001 2026-04-01" ]
 }
+
+@test "status stops on an Account Mapping whose name spans lines" {
+  write_config '[{"name": "Check\ning", "moneymoney_account": "DE001", "ynab_account_id": "ynab-checking"}]'
+
+  run "$FLUSSO" status
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Error: Invalid Account Mapping in"* ]] || false
+  [ -z "$(transaction_exports)" ]
+}

@@ -190,9 +190,15 @@ load_config() {
 }
 
 # Print the configured Account Mappings, one per line, with defaults resolved:
-# name, MoneyMoney account, YNAB account id, mode, start date (separated by \x1f)
+# name, MoneyMoney Account, YNAB Account id, mode, start date (separated by \x1f).
+# Fails if a mapping lacks one of the first three or they don't fit on one line.
 account_mappings() {
-  jq -r --arg global_start "$GLOBAL_START_DATE" '.accounts[] | [
+  jq -r --arg global_start "$GLOBAL_START_DATE" '.accounts[]
+    | if type == "object"
+        and ([.name, .moneymoney_account, .ynab_account_id]
+          | all(type == "string" and . != "" and (test("[\n\u001f]") | not)))
+      then . else error("Invalid Account Mapping: \(tojson)") end
+    | [
     .name,
     .moneymoney_account,
     .ynab_account_id,
@@ -538,10 +544,10 @@ cmd_add() {
 
 # Exit codes of balance_diff
 BALANCE_NOT_IN_MONEYMONEY=1
-BALANCE_NOT_IN_YNAB=2
+BALANCE_YNAB_FETCH_FAILED=2
 
-# Compare the balance of a MoneyMoney account (looked up in MM_ACCOUNTS, the
-# account export) with its YNAB account. Prints "MONEYMONEY YNAB DIFFERENCE"
+# Compare the balance of a MoneyMoney Account (looked up in MM_ACCOUNTS, the
+# account export) with its YNAB Account. Prints "MONEYMONEY YNAB DIFFERENCE"
 # in milliunits, or fails with one of the BALANCE_* codes above.
 balance_diff() {
   local mm_acct="$1" ynab_account_id="$2" mm_accounts="$3"
@@ -553,8 +559,8 @@ balance_diff() {
 
   local ynab_balance
   ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" | jq '.data.account.balance // empty') \
-    || return $BALANCE_NOT_IN_YNAB
-  [ -n "$ynab_balance" ] || return $BALANCE_NOT_IN_YNAB
+    || return $BALANCE_YNAB_FETCH_FAILED
+  [ -n "$ynab_balance" ] || return $BALANCE_YNAB_FETCH_FAILED
 
   echo "$mm_balance $ynab_balance $((mm_balance - ynab_balance))"
 }
@@ -570,7 +576,8 @@ sync_balance() {
   case "$diff_rc" in
     0) ;;
     "$BALANCE_NOT_IN_MONEYMONEY") echo "$(red "Error:") Account not found in MoneyMoney."; return 1 ;;
-    *) echo "$(red "Error:") Could not fetch YNAB account balance."; return 1 ;;
+    "$BALANCE_YNAB_FETCH_FAILED") echo "$(red "Error:") Could not fetch YNAB account balance."; return 1 ;;
+    *) echo "$(red "Error:") Could not compare balances."; return 1 ;;
   esac
 
   local mm_balance ynab_balance diff
@@ -687,7 +694,8 @@ cmd_sync() {
   local total_adjusted=0
   local mm_accounts=""
 
-  local name mm_acct ynab_account_id mode start_date
+  local mappings name mm_acct ynab_account_id mode start_date
+  mappings=$(account_mappings) || die "Invalid Account Mapping in $CONFIG_FILE."
   while IFS=$'\x1f' read -r -u 3 name mm_acct ynab_account_id mode start_date; do
 
     # Filter by account name if specified
@@ -820,7 +828,7 @@ cmd_sync() {
 
     echo "$(green "✓") $marked transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
     echo ""
-  done 3< <(account_mappings)
+  done 3<<< "$mappings"
 
   local adjusted_note=""
   if [ "$dry_run" = true ]; then
@@ -852,7 +860,8 @@ cmd_status() {
 
   local mm_accounts=""
 
-  local name mm_acct ynab_account_id mode start_date
+  local mappings name mm_acct ynab_account_id mode start_date
+  mappings=$(account_mappings) || die "Invalid Account Mapping in $CONFIG_FILE."
   while IFS=$'\x1f' read -r -u 3 name mm_acct ynab_account_id mode start_date; do
 
     if [ "$mode" = "balance" ]; then
@@ -889,7 +898,7 @@ cmd_status() {
       "$(green "$synced_count")" \
       "$unsynced_count" \
       "$(dim "since $start_date")"
-  done 3< <(account_mappings)
+  done 3<<< "$mappings"
 
   echo ""
 }

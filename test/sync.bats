@@ -321,3 +321,25 @@ load test_helper
   [[ "$output" == *"Error: Could not fetch YNAB account balance."* ]] || false
   [ "$(posted_transactions)" = "[]" ]
 }
+
+@test "sync stops on an Account Mapping without a YNAB Account" {
+  write_config '[{"name": "Checking", "moneymoney_account": "DE001"}]'
+  mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" "" | mm_has_transactions
+  ynab_accepts_transactions 1
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Error: Invalid Account Mapping in"* ]] || false
+  [ -z "$(transaction_exports)" ]
+  [ "$(posted_transactions)" = "[]" ]
+}
+
+@test "sync stops on an Account Mapping that isn't an object" {
+  write_config '["DE001"]'
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Error: Invalid Account Mapping in"* ]] || false
+}
