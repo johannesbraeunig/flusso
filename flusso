@@ -524,28 +524,45 @@ cmd_add() {
 
 # ── sync: balance mode ───────────────────────────────────────
 
+# Exit codes of balance_diff
+BALANCE_NOT_IN_MONEYMONEY=1
+BALANCE_NOT_IN_YNAB=2
+
+# Compare the balance of a MoneyMoney account (looked up in MM_ACCOUNTS, the
+# account export) with its YNAB account. Prints "MONEYMONEY YNAB DIFFERENCE"
+# in milliunits, or fails with one of the BALANCE_* codes above.
+balance_diff() {
+  local mm_acct="$1" ynab_account_id="$2" mm_accounts="$3"
+
+  local mm_balance
+  mm_balance=$(echo "$mm_accounts" | jq --arg n "$mm_acct" \
+    'first(.[] | select(.accountNumber == $n) | .balance[0][0] * 1000 | round) // empty')
+  [ -n "$mm_balance" ] || return $BALANCE_NOT_IN_MONEYMONEY
+
+  local ynab_balance
+  ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" | jq '.data.account.balance // empty') \
+    || return $BALANCE_NOT_IN_YNAB
+  [ -n "$ynab_balance" ] || return $BALANCE_NOT_IN_YNAB
+
+  echo "$mm_balance $ynab_balance $((mm_balance - ynab_balance))"
+}
+
 # Brings the YNAB account balance in line with MoneyMoney by posting the
 # difference as a single adjustment transaction (e.g. depot value changes).
 # Sets BALANCE_ADJUSTED=1 if an adjustment was posted (or would be, in dry run).
 sync_balance() {
   local mm_acct="$1" ynab_account_id="$2" dry_run="$3" mm_accounts="$4"
 
-  local mm_balance
-  mm_balance=$(echo "$mm_accounts" | jq --arg n "$mm_acct" \
-    'first(.[] | select(.accountNumber == $n) | .balance[0][0] * 1000 | round) // empty')
-  if [ -z "$mm_balance" ]; then
-    echo "$(red "Error:") Account not found in MoneyMoney."
-    return 1
-  fi
+  local balances diff_rc=0
+  balances=$(balance_diff "$mm_acct" "$ynab_account_id" "$mm_accounts") || diff_rc=$?
+  case "$diff_rc" in
+    0) ;;
+    "$BALANCE_NOT_IN_MONEYMONEY") echo "$(red "Error:") Account not found in MoneyMoney."; return 1 ;;
+    *) echo "$(red "Error:") Could not fetch YNAB account balance."; return 1 ;;
+  esac
 
-  local ynab_balance
-  if ! ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" | jq '.data.account.balance // empty') \
-    || [ -z "$ynab_balance" ]; then
-    echo "$(red "Error:") Could not fetch YNAB account balance."
-    return 1
-  fi
-
-  local diff=$((mm_balance - ynab_balance))
+  local mm_balance ynab_balance diff
+  read -r mm_balance ynab_balance diff <<< "$balances"
   echo "$(dim "MoneyMoney: $(fmt_milliunits "$mm_balance")  YNAB: $(fmt_milliunits "$ynab_balance")")"
 
   if [ "$diff" -eq 0 ]; then
@@ -838,20 +855,19 @@ cmd_status() {
     mode=$(jq -r ".accounts[$i].mode // \"transactions\"" "$CONFIG_FILE")
 
     if [ "$mode" = "balance" ]; then
-      local ynab_account_id mm_balance ynab_balance
+      local ynab_account_id balances mm_balance ynab_balance diff state
       ynab_account_id=$(jq -r ".accounts[$i].ynab_account_id" "$CONFIG_FILE")
       [ -z "$mm_accounts" ] && { mm_accounts=$(mm_export_accounts 2>/dev/null) || mm_accounts="[]"; }
-      mm_balance=$(echo "$mm_accounts" | jq --arg n "$mm_acct" \
-        'first(.[] | select(.accountNumber == $n) | .balance[0][0] * 1000 | round) // empty')
-      ynab_balance=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id" 2>/dev/null | jq '.data.account.balance // empty') || ynab_balance=""
 
-      local state
-      if [ -z "$mm_balance" ] || [ -z "$ynab_balance" ]; then
+      if ! balances=$(balance_diff "$mm_acct" "$ynab_account_id" "$mm_accounts" 2>/dev/null); then
         state="$(red "unavailable")"
-      elif [ "$mm_balance" -eq "$ynab_balance" ]; then
-        state="$(green "in sync") at $(fmt_milliunits "$mm_balance")"
       else
-        state="$(fmt_milliunits $((mm_balance - ynab_balance))) to adjust"
+        read -r mm_balance ynab_balance diff <<< "$balances"
+        if [ "$diff" -eq 0 ]; then
+          state="$(green "in sync") at $(fmt_milliunits "$mm_balance")"
+        else
+          state="$(fmt_milliunits "$diff") to adjust"
+        fi
       fi
       printf "  %-25s %s  %s\n" "$(bold "$name")" "$state" "$(dim "balance")"
       continue

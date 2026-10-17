@@ -297,3 +297,27 @@ load test_helper
   [ "$(grep -F "Cafe" <<< "$output" | grep -c "\[pending\]")" -eq 1 ]
   [ "$(posted_transactions)" = "[]" ]
 }
+
+@test "Balance Sync reports a Brokerage Account MoneyMoney doesn't know" {
+  write_config "[$BROKERAGE_MAPPING]"
+  mm_account 999999999 10000 true | mm_has_accounts
+  ynab_has_balance "$YNAB_BROKERAGE" 10000000
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Error: Account not found in MoneyMoney."* ]] || false
+  [ "$(posted_transactions)" = "[]" ]
+}
+
+@test "Balance Sync reports when the YNAB balance can't be fetched" {
+  write_config "[$BROKERAGE_MAPPING]"
+  mm_account 123456789 10000 true | mm_has_accounts
+  # No YNAB route, so the balance request fails
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Error: Could not fetch YNAB account balance."* ]] || false
+  [ "$(posted_transactions)" = "[]" ]
+}
