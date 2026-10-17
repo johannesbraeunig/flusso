@@ -7,4 +7,7 @@ install:
 uninstall:
 	rm -f $(PREFIX)/bin/flusso
 
-.PHONY: install uninstall
+test:
+	bats test
+
+.PHONY: install uninstall test

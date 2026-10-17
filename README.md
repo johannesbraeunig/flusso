@@ -339,6 +339,17 @@ flusso sync
 
 MoneyMoney is the single source of truth. The sync category on each transaction acts as both a visual indicator and dedup mechanism. YNAB also deduplicates on its end via `import_id`.
 
+## Development
+
+Tests use [bats-core](https://github.com/bats-core/bats-core) and run `flusso` as a real process against fake `osascript` and `curl` commands, so they need neither MoneyMoney nor a YNAB token:
+
+```bash
+brew install bats-core
+make test
+```
+
+Each test gets its own temporary `HOME`, so your real `~/.flusso` is never touched.
+
 ## License
 
 MIT

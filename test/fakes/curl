@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fake curl: serves YNAB fixtures and logs each request.
+# Responses come from $FAKE_DIR/ynab/routes (lines: METHOD PATH FILE, PATH without
+# query string); an unknown route fails like `curl -f` on an HTTP error.
+set -u
+
+method="GET" body="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -d) body="$2"; shift 2 ;;
+    -H) shift 2 ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+
+case "$body" in
+  @*) body=$(cat "${body#@}") ;;
+esac
+
+path="${url#https://api.ynab.com/v1}"
+jq -cn --arg method "$method" --arg path "$path" --arg body "$body" \
+  '{method: $method, path: $path, body: (try ($body | fromjson) catch $body)}' \
+  >> "$FAKE_DIR/curl.log"
+
+route_path="${path%%\?*}"
+while read -r r_method r_path r_file; do
+  if [ "$r_method" = "$method" ] && [ "$r_path" = "$route_path" ]; then
+    cat "$r_file"
+    exit 0
+  fi
+done < "$FAKE_DIR/ynab/routes"
+
+exit 22

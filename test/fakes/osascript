@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Fake osascript: serves MoneyMoney fixtures and logs each call.
+# Responses come from $FAKE_DIR/mm/<command>.plist; a missing file makes the call fail.
+set -u
+
+script="" args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -e) script+="$2"$'\n'; shift 2 ;;
+    --) shift; args=("$@"); break ;;
+    *) shift ;;
+  esac
+done
+
+case "$script" in
+  *"export transactions"*) command="export-transactions" ;;
+  *"export accounts"*)     command="export-accounts" ;;
+  *"export categories"*)   command="export-categories" ;;
+  *"set transaction"*)     command="set-transaction" ;;
+  *)                       command="unknown" ;;
+esac
+
+if [ "$command" = "set-transaction" ]; then
+  # Resolve `set transaction id (<p> as integer) category to <q>` against the
+  # `on run {...}` parameters, so the log shows what MoneyMoney would really get
+  params=$(sed -n 's/.*on run {\(.*\)}.*/\1/p' <<< "$script" | tr -d ' ')
+  stmt=$(sed -n 's/.*set transaction id (\(.*\) as integer) category to \(.*\)$/\1 \2/p' <<< "$script")
+  read -r id_expr cat_expr <<< "$stmt"
+  if [ -z "${id_expr:-}" ] || [ -z "${cat_expr:-}" ]; then
+    echo "MoneyMoney fake can't parse set transaction statement:" >&2
+    echo "$script" >&2
+    exit 1
+  fi
+  resolve() {
+    local i=0 p names
+    IFS=, read -ra names <<< "$params"
+    for p in "${names[@]}"; do
+      [ "$p" = "$1" ] && { printf '%s' "${args[$i]:-}"; return; }
+      i=$((i + 1))
+    done
+    printf '%s' "$1" | sed 's/^"\(.*\)"$/\1/'
+  }
+  jq -cn --arg id "$(resolve "$id_expr")" --arg category "$(resolve "$cat_expr")" \
+    '{command: "set-transaction", id: $id, category: $category, args: $ARGS.positional}' \
+    --args ${args[@]+"${args[@]}"} >> "$FAKE_DIR/osascript.log"
+  exit 0
+fi
+
+jq -cn --arg command "$command" '{command: $command, args: $ARGS.positional}' \
+  --args ${args[@]+"${args[@]}"} >> "$FAKE_DIR/osascript.log"
+
+response="$FAKE_DIR/mm/$command.plist"
+if [ ! -f "$response" ]; then
+  echo "execution error: MoneyMoney fake has no $command response (-1728)" >&2
+  exit 1
+fi
+cat "$response"
