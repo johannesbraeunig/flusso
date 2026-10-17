@@ -689,6 +689,109 @@ new_pending_transactions() {
   '
 }
 
+# ── sync: transaction mode ───────────────────────────────────
+
+# Sends the Unsynced Transactions of a MoneyMoney Account to its YNAB Account
+# and marks them as synced; with include_pending also the new Pending
+# Transactions. Sets TRANSACTIONS_SYNCED to how many YNAB created (or would
+# get, in dry run). Fails if the MoneyMoney Account or YNAB couldn't be reached.
+sync_transactions() {
+  local mm_acct="$1" ynab_account_id="$2" start_date="$3" dry_run="$4" include_pending="$5"
+
+  local export_rc=0
+  export_classified_transactions "$mm_acct" "$start_date" || export_rc=$?
+  case "$export_rc" in
+    0) ;;
+    "$MM_EXPORT_FAILED")
+      echo "$(red "Error:") Could not export from MoneyMoney."
+      echo "$(dim "Make sure MoneyMoney is running and has granted automation access.")"
+      echo "$(dim "$EXPORT_PROBLEM")"
+      return 1
+      ;;
+    *)
+      echo "$(red "Error:") Could not parse plist data."
+      echo "$(dim "$EXPORT_PROBLEM")"
+      return 1
+      ;;
+  esac
+
+  local classified="$CLASSIFIED_TRANSACTIONS" unsynced
+  unsynced=$(echo "$classified" | jq '.unsynced')
+
+  local new_pending="[]"
+  if [ "$include_pending" = true ] \
+    && ! new_pending=$(new_pending_transactions "$(echo "$classified" | jq '.pending')" "$ynab_account_id" "$start_date"); then
+    echo "$(red "Error:") Could not fetch YNAB transactions, skipping pending transactions."
+    new_pending="[]"
+  fi
+
+  local tx_count pending_count
+  pending_count=$(echo "$new_pending" | jq 'length')
+  tx_count=$(( $(echo "$unsynced" | jq 'length') + pending_count ))
+
+  if [ "$tx_count" -eq 0 ]; then
+    echo "$(green "✓") No new transactions."
+    return 0
+  fi
+
+  if [ "$pending_count" -gt 0 ]; then
+    echo "$tx_count new transaction(s) found ($pending_count pending)."
+  else
+    echo "$tx_count new transaction(s) found."
+  fi
+
+  if [ "$dry_run" = true ]; then
+    echo ""
+    printf "  $(dim "%-12s %-10s %-28s %s")\n" "DATE" "AMOUNT" "PAYEE" "MEMO"
+    printf "  $(dim "%-12s %-10s %-28s %s")\n" "----------" "----------" "----------------------------" "----------------------------"
+    # The kind comes first: IFS collapses empty fields (e.g. no memo) in the middle
+    jq -rn --argjson u "$unsynced" --argjson p "$new_pending" '
+      ($u | map(. + {kind: "unsynced"})) + ($p | map(. + {kind: "pending"}))
+      | .[] | "\(.kind)\t\(.bookingDate[:10] // .bookingDate)\t\(.amount * 100 | round / 100)\t\(.name // "Unknown")\t\(.purpose // "")"
+    ' | while IFS=$'\t' read -r kind date amount payee memo; do
+      local marker=""
+      [ "$kind" = pending ] && marker=" $(dim "[pending]")"
+      env LC_NUMERIC=C printf "  %-12s %-10.2f %-28s %s%s\n" "$date" "$amount" "${payee:0:28}" "${memo:0:40}" "$marker"
+    done
+    TRANSACTIONS_SYNCED=$tx_count
+    return 0
+  fi
+
+  # Build YNAB payload
+  local payload
+  payload=$(jq -n --argjson u "$unsynced" --argjson p "$new_pending" --arg acct "$ynab_account_id" '
+    def ynab_transaction: {
+      account_id: $acct,
+      date: (.bookingDate[:10] // .bookingDate),
+      amount: ((.amount * 1000) | round),
+      payee_name: (.name // "Unknown"),
+      memo: (.purpose // "")
+    };
+    {transactions: (
+      ($u | map(ynab_transaction + {cleared: "cleared", import_id: ("tx_" + (.id | tostring))}))
+      # No import_id, so YNAB matches the booked version to it later
+      + ($p | map(ynab_transaction + {cleared: "uncleared"}))
+    )}')
+
+  # POST to YNAB
+  local result created duplicates
+  if ! result=$(ynab_create_transactions "$payload"); then
+    echo "$(red "Error:") YNAB API request failed."
+    echo "$(dim "$result")"
+    return 1
+  fi
+  read -r created duplicates <<< "$result"
+
+  echo "$(green "✓") $created created, $duplicates duplicates skipped."
+  TRANSACTIONS_SYNCED=$created
+
+  # Mark the Unsynced Transactions as synced (pending ones are deduped via YNAB)
+  local marked
+  marked=$(echo "$unsynced" | jq -r '.[].id' | mm_mark_synced "$SYNC_CATEGORY_UUID")
+
+  echo "$(green "✓") $marked transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
+}
+
 # ── sync ─────────────────────────────────────────────────────
 
 cmd_sync() {
@@ -719,7 +822,6 @@ cmd_sync() {
   [ "$account_count" -eq 0 ] && die "No accounts configured. Run 'flusso setup' first."
 
   local total_synced=0
-  local total_skipped=0
   local total_adjusted=0
   local mm_accounts=""
 
@@ -748,116 +850,24 @@ cmd_sync() {
       total_adjusted=$((total_adjusted + BALANCE_ADJUSTED))
       echo ""
       continue
-    elif [ "$mode" != "transactions" ]; then
+    fi
+
+    if [ "$mode" != "transactions" ]; then
       echo "$(red "Error:") Unknown mode \"$mode\" (expected transactions or balance)."
       echo ""
       continue
     fi
 
-    local export_rc=0
-    export_classified_transactions "$mm_acct" "$start_date" || export_rc=$?
-    case "$export_rc" in
-      0) ;;
-      "$MM_EXPORT_FAILED")
-        echo "$(red "Error:") Could not export from MoneyMoney."
-        echo "$(dim "Make sure MoneyMoney is running and has granted automation access.")"
-        echo "$(dim "$EXPORT_PROBLEM")"
-        echo ""
-        continue
-        ;;
-      *)
-        echo "$(red "Error:") Could not parse plist data."
-        echo "$(dim "$EXPORT_PROBLEM")"
-        echo ""
-        continue
-        ;;
-    esac
-
-    local classified="$CLASSIFIED_TRANSACTIONS" unsynced
-    unsynced=$(echo "$classified" | jq '.unsynced')
-
-    local new_pending="[]"
-    if [ "$include_pending" = true ] \
-      && ! new_pending=$(new_pending_transactions "$(echo "$classified" | jq '.pending')" "$ynab_account_id" "$start_date"); then
-      echo "$(red "Error:") Could not fetch YNAB transactions, skipping pending transactions."
-      new_pending="[]"
-    fi
-
-    local tx_count pending_count
-    pending_count=$(echo "$new_pending" | jq 'length')
-    tx_count=$(( $(echo "$unsynced" | jq 'length') + pending_count ))
-
-    if [ "$tx_count" -eq 0 ]; then
-      echo "$(green "✓") No new transactions."
-      echo ""
-      continue
-    fi
-
-    if [ "$pending_count" -gt 0 ]; then
-      echo "$tx_count new transaction(s) found ($pending_count pending)."
-    else
-      echo "$tx_count new transaction(s) found."
-    fi
-
-    if [ "$dry_run" = true ]; then
-      echo ""
-      printf "  $(dim "%-12s %-10s %-28s %s")\n" "DATE" "AMOUNT" "PAYEE" "MEMO"
-      printf "  $(dim "%-12s %-10s %-28s %s")\n" "----------" "----------" "----------------------------" "----------------------------"
-      # The kind comes first: IFS collapses empty fields (e.g. no memo) in the middle
-      jq -rn --argjson u "$unsynced" --argjson p "$new_pending" '
-        ($u | map(. + {kind: "unsynced"})) + ($p | map(. + {kind: "pending"}))
-        | .[] | "\(.kind)\t\(.bookingDate[:10] // .bookingDate)\t\(.amount * 100 | round / 100)\t\(.name // "Unknown")\t\(.purpose // "")"
-      ' | while IFS=$'\t' read -r kind date amount payee memo; do
-        local marker=""
-        [ "$kind" = pending ] && marker=" $(dim "[pending]")"
-        env LC_NUMERIC=C printf "  %-12s %-10.2f %-28s %s%s\n" "$date" "$amount" "${payee:0:28}" "${memo:0:40}" "$marker"
-      done
-      echo ""
-      total_skipped=$((total_skipped + tx_count))
-      continue
-    fi
-
-    # Build YNAB payload
-    local payload
-    payload=$(jq -n --argjson u "$unsynced" --argjson p "$new_pending" --arg acct "$ynab_account_id" '
-      def ynab_transaction: {
-        account_id: $acct,
-        date: (.bookingDate[:10] // .bookingDate),
-        amount: ((.amount * 1000) | round),
-        payee_name: (.name // "Unknown"),
-        memo: (.purpose // "")
-      };
-      {transactions: (
-        ($u | map(ynab_transaction + {cleared: "cleared", import_id: ("tx_" + (.id | tostring))}))
-        # No import_id, so YNAB matches the booked version to it later
-        + ($p | map(ynab_transaction + {cleared: "uncleared"}))
-      )}')
-
-    # POST to YNAB
-    local result created duplicates
-    if ! result=$(ynab_create_transactions "$payload"); then
-      echo "$(red "Error:") YNAB API request failed."
-      echo "$(dim "$result")"
-      echo ""
-      continue
-    fi
-    read -r created duplicates <<< "$result"
-
-    echo "$(green "✓") $created created, $duplicates duplicates skipped."
-    total_synced=$((total_synced + created))
-
-    # Mark the Unsynced Transactions as synced (pending ones are deduped via YNAB)
-    local marked
-    marked=$(echo "$unsynced" | jq -r '.[].id' | mm_mark_synced "$SYNC_CATEGORY_UUID")
-
-    echo "$(green "✓") $marked transaction(s) marked as synced with \"$SYNC_CATEGORY_NAME\"."
+    TRANSACTIONS_SYNCED=0
+    sync_transactions "$mm_acct" "$ynab_account_id" "$start_date" "$dry_run" "$include_pending" || true
+    total_synced=$((total_synced + TRANSACTIONS_SYNCED))
     echo ""
   done 3<<< "$mappings"
 
   local adjusted_note=""
   if [ "$dry_run" = true ]; then
     [ "$total_adjusted" -gt 0 ] && adjusted_note=" $total_adjusted balance adjustment(s) would be posted."
-    echo "$(bold "Dry run complete.") $total_skipped transaction(s) would be synced.$adjusted_note"
+    echo "$(bold "Dry run complete.") $total_synced transaction(s) would be synced.$adjusted_note"
   else
     [ "$total_adjusted" -gt 0 ] && adjusted_note=" $total_adjusted balance adjustment(s) posted."
     echo "$(bold "$(green "✓ Sync complete.")") $total_synced transaction(s) synced.$adjusted_note"

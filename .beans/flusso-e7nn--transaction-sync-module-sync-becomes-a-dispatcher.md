@@ -1,12 +1,13 @@
 ---
 # flusso-e7nn
 title: Transaction Sync module; sync becomes a dispatcher
-status: todo
+status: completed
 type: task
+priority: normal
 tags:
     - ready-for-agent
 created_at: 2026-10-17T10:21:11Z
-updated_at: 2026-10-17T10:21:11Z
+updated_at: 2026-10-17T10:24:50Z
 parent: flusso-4ctd
 blocked_by:
     - flusso-ygm7
@@ -32,8 +33,12 @@ It reports how many it synced (or would sync) to the caller, following Balance S
 
 ## Acceptance criteria
 
-- [ ] Transaction Sync for one Account Mapping is its own module and reports its count the way Balance Sync does
-- [ ] YNAB transactions are built from MoneyMoney transactions in exactly one place
-- [ ] The sync command contains no per-transaction logic; it dispatches on balance / transactions / unknown mode and adds up the totals
-- [ ] Pending Transactions are synced only with `include_pending: true` or `--include-pending`
-- [ ] Output text, exit codes and dedup behaviour (ADR 0001) are unchanged; the full bats suite passes unmodified
+- [x] Transaction Sync for one Account Mapping is its own module and reports its count the way Balance Sync does
+- [x] YNAB transactions are built from MoneyMoney transactions in exactly one place
+- [x] The sync command contains no per-transaction logic; it dispatches on balance / transactions / unknown mode and adds up the totals
+- [x] Pending Transactions are synced only with `include_pending: true` or `--include-pending`
+- [x] Output text, exit codes and dedup behaviour (ADR 0001) are unchanged; the full bats suite passes unmodified
+
+## Summary of Changes
+
+Extracted `sync_transactions` (new section "sync: transaction mode"), which has the same shape as `sync_balance`: it takes the MoneyMoney Account, YNAB Account, start date, dry-run and include-pending flags, prints the per-mapping output, sets `TRANSACTIONS_SYNCED`, and returns non-zero when the mapping failed. `cmd_sync` now only parses flags, filters by `--account`, dispatches on mode and adds up the totals. The live and dry-run totals share one counter. Suite 56/56 green.
