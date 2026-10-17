@@ -73,27 +73,71 @@ xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
-# mm_has_transactions < TX_DICTS
-# Serves the given transaction dicts for every "export transactions" call.
+# mm_has_transactions [MONEYMONEY_ACCOUNT] < TX_DICTS
+# Serves the given transaction dicts for "export transactions" of that
+# MoneyMoney Account, or of every account if none is given.
 mm_has_transactions() {
-  {
-    cat <<'EOF'
+  { echo "<dict><key>creator</key><string>MoneyMoney</string><key>transactions</key><array>"
+    cat
+    echo "</array></dict>"
+  } | plist_document > "$FAKE_DIR/mm/export-transactions${1:+-$1}.plist"
+}
+
+# mm_has_single_transaction < TX_DICT
+# Serves an export whose transactions value is one dict instead of an array.
+mm_has_single_transaction() {
+  { echo "<dict><key>creator</key><string>MoneyMoney</string><key>transactions</key>"
+    cat
+    echo "</dict>"
+  } | plist_document > "$FAKE_DIR/mm/export-transactions.plist"
+}
+
+# mm_account NUMBER BALANCE PORTFOLIO
+# Prints one account <dict> as MoneyMoney's "export accounts" does (with icon blob).
+mm_account() {
+  cat <<EOF
+	<dict>
+		<key>accountNumber</key>
+		<string>$1</string>
+		<key>balance</key>
+		<array>
+			<array>
+				<real>$2</real>
+				<string>EUR</string>
+			</array>
+		</array>
+		<key>group</key>
+		<false/>
+		<key>icon</key>
+		<data>
+		iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk
+		</data>
+		<key>name</key>
+		<string>Account $1</string>
+		<key>portfolio</key>
+		<$3/>
+		<key>refreshTimestamp</key>
+		<date>2026-04-05T08:00:00Z</date>
+	</dict>
+EOF
+}
+
+# mm_has_accounts < ACCOUNT_DICTS
+# Serves the given account dicts for "export accounts".
+mm_has_accounts() {
+  { echo "<array>"; cat; echo "</array>"; } | plist_document > "$FAKE_DIR/mm/export-accounts.plist"
+}
+
+# plist_document < PLIST_VALUE
+# Wraps a plist value in the XML prolog MoneyMoney's exports start with.
+plist_document() {
+  cat <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict>
-	<key>creator</key>
-	<string>MoneyMoney</string>
-	<key>transactions</key>
-	<array>
 EOF
-    cat
-    cat <<'EOF'
-	</array>
-</dict>
-</plist>
-EOF
-  } > "$FAKE_DIR/mm/export-transactions.plist"
+  cat
+  echo "</plist>"
 }
 
 # ── YNAB fixtures ───────────────────────────────────────────
@@ -114,7 +158,29 @@ ynab_accepts_transactions() {
     '{data: {transaction_ids: [range($c) | "ynab-tx-\(.)"], duplicate_import_ids: [range($d) | "dup-\(.)"]}}')"
 }
 
+# ynab_has_transactions ACCOUNT_ID JSON_ARRAY
+# Serves the YNAB Account's existing transactions.
+ynab_has_transactions() {
+  ynab_route GET "/budgets/$BUDGET_ID/accounts/$1/transactions" "{\"data\": {\"transactions\": $2}}"
+}
+
+# ynab_has_balance ACCOUNT_ID MILLIUNITS
+# Serves the YNAB Account with the given balance.
+ynab_has_balance() {
+  ynab_route GET "/budgets/$BUDGET_ID/accounts/$1" "{\"data\": {\"account\": {\"id\": \"$1\", \"balance\": $2}}}"
+}
+
 # ── Call logs ───────────────────────────────────────────────
+
+# MoneyMoney Accounts whose transactions were exported, one per line.
+exported_accounts() {
+  jq -r 'select(.command == "export-transactions") | .args[0]' "$FAKE_DIR/osascript.log"
+}
+
+# All requests sent to YNAB, as one JSON array.
+ynab_requests() {
+  jq -s '.' "$FAKE_DIR/curl.log"
+}
 
 # Transactions posted to YNAB, as one JSON array across all POSTs.
 posted_transactions() {
