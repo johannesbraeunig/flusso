@@ -20,6 +20,8 @@ Flusso — a macOS CLI tool that syncs MoneyMoney transactions to YNAB.
 
 Each synced transaction gets assigned a configurable MoneyMoney category (e.g. "YNAB Synced"). On next sync, transactions with this category are skipped. YNAB also deduplicates via `import_id`.
 
+Optional pending transactions (`include_pending` / `--include-pending`) are the exception: MoneyMoney replaces them on booking, so they aren't categorized. They're posted as uncleared without `import_id` and deduped against YNAB (same date + amount); YNAB later matches the booked version to them.
+
 ### Key dependencies
 
 - `curl`, `jq`, `osascript`, `plutil` (all macOS built-ins except jq)

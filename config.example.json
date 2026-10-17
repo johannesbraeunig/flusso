@@ -2,6 +2,7 @@
   "api_token": "YOUR_YNAB_API_TOKEN",
   "budget_id": "YOUR_YNAB_BUDGET_ID",
   "start_date": "2026-04-01",
+  "include_pending": false,
   "sync_category": {
     "uuid": "YOUR_MONEYMONEY_CATEGORY_UUID",
     "name": "YNAB Synced"

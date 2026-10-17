@@ -6,7 +6,7 @@ CLI tool that syncs [MoneyMoney](https://moneymoney.app) transactions to [YNAB](
 flusso sync
 ```
 
-Flusso talks to MoneyMoney via AppleScript, fetches your transactions, filters out duplicates and pending entries, and sends everything to YNAB via their API. Synced transactions are categorized directly in MoneyMoney — no external state files needed.
+Flusso talks to MoneyMoney via AppleScript, fetches your transactions, filters out duplicates (and, unless you opt in, pending entries), and sends everything to YNAB via their API. Synced transactions are categorized directly in MoneyMoney — no external state files needed.
 
 Checking, savings and credit card accounts sync transaction by transaction. Brokerage accounts (depots) sync their balance: Flusso posts the change in market value as an adjustment, so your YNAB tracking account always matches MoneyMoney.
 
@@ -98,6 +98,8 @@ Syncs all configured accounts:
 
 The category in MoneyMoney is the single source of truth — no state files to maintain. Re-running `flusso sync` only picks up uncategorized transactions.
 
+**Pending transactions** (vorgemerkte Umsätze) are skipped by default. Enable them with `--include-pending` or `"include_pending": true` in the config. They're sent to YNAB as *uncleared* and without an `import_id`. Once MoneyMoney books the transaction, the booked version is synced as usual and YNAB matches it to the pending one (same amount, date within ±10 days), so it becomes cleared instead of being duplicated. Because MoneyMoney replaces pending entries when they're booked, they aren't categorized; instead Flusso skips pending transactions that already exist in YNAB with the same date and amount. If the booked amount differs from the pending one (e.g. tips, currency conversion, hotel pre-authorizations), YNAB can't match them — delete or match the leftover uncleared transaction manually.
+
 Accounts in `balance` mode work differently: Flusso compares the current balance in MoneyMoney with the YNAB account balance and, if they differ, posts one "Balance Adjustment" transaction for the difference (dated today). Transfers you record in YNAB (e.g. a monthly savings plan from checking to the depot) are already part of the YNAB balance, so the adjustment only reflects market value changes. Map depots to a YNAB **tracking account**, so adjustments don't affect your budget.
 
 **Options:**
@@ -106,10 +108,12 @@ Accounts in `balance` mode work differently: Flusso compares the current balance
 |------|-------------|
 | `--dry-run` | Preview what would be synced without sending |
 | `--account <name>` | Sync only the named account |
+| `--include-pending` | Also sync pending transactions as uncleared (see above) |
 
 ```bash
 flusso sync --dry-run                    # Preview
 flusso sync --account "Checking"         # Sync one account
+flusso sync --include-pending            # Include pending transactions
 ```
 
 ### `flusso status`
@@ -134,6 +138,7 @@ Config is stored at `~/.flusso/config.json`:
   "api_token": "YOUR_YNAB_API_TOKEN",
   "budget_id": "YOUR_YNAB_BUDGET_ID",
   "start_date": "2026-04-01",
+  "include_pending": false,
   "sync_category": {
     "uuid": "YOUR_MONEYMONEY_CATEGORY_UUID",
     "name": "YNAB Synced"
@@ -165,6 +170,7 @@ Config is stored at `~/.flusso/config.json`:
 | `api_token` | YNAB Personal Access Token |
 | `budget_id` | YNAB budget ID (selected during setup) |
 | `start_date` | Global cutoff — only sync transactions from this date onward |
+| `include_pending` | Optional: also sync pending transactions as uncleared (default `false`) |
 | `sync_category.uuid` | MoneyMoney category UUID assigned to synced transactions |
 | `sync_category.name` | Display name of the sync category |
 | `accounts[].name` | Display name for the account |

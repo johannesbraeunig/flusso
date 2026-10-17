@@ -87,6 +87,7 @@ load_config() {
   GLOBAL_START_DATE=$(jq -r '.start_date // empty' "$CONFIG_FILE")
   SYNC_CATEGORY_UUID=$(jq -r '.sync_category.uuid // empty' "$CONFIG_FILE")
   SYNC_CATEGORY_NAME=$(jq -r '.sync_category.name // empty' "$CONFIG_FILE")
+  INCLUDE_PENDING=$(jq -r '.include_pending // false' "$CONFIG_FILE")
   if [ -z "$SYNC_CATEGORY_UUID" ]; then
     die "sync_category is missing in config. Run 'flusso setup' again."
   fi
@@ -498,6 +499,43 @@ sync_balance() {
   BALANCE_ADJUSTED=1
 }
 
+# ── sync: pending transactions ───────────────────────────────
+
+# Prints the pending (not yet booked) transactions that aren't in YNAB yet.
+# MoneyMoney replaces a pending entry with a new one once it's booked, so the
+# sync category can't track them. Instead they're posted without import_id,
+# and deduped against YNAB transactions without import_id on the same date
+# with the same amount. When the booked version is synced later, YNAB matches
+# it to that transaction (same amount, date ±10 days).
+new_pending_transactions() {
+  local transactions_json="$1" ynab_account_id="$2" start_date="$3"
+
+  local pending
+  pending=$(echo "$transactions_json" | jq '
+    (.transactions // .) | if type == "array" then . else [.] end
+    | map(select(.booked == false))
+  ')
+  if [ "$(echo "$pending" | jq 'length')" -eq 0 ]; then
+    echo "[]"
+    return 0
+  fi
+
+  local ynab_transactions
+  ynab_transactions=$(ynab_get "/budgets/$BUDGET_ID/accounts/$ynab_account_id/transactions?since_date=$start_date") \
+    || return 1
+
+  # Multiset match on date|amount, so two identical pending entries still both sync
+  echo "$pending" | jq --argjson ynab "$ynab_transactions" '
+    ($ynab.data.transactions
+      | map(select(.deleted == false and .import_id == null) | "\(.date)|\(.amount)")
+      | group_by(.) | map({key: .[0], value: length}) | from_entries) as $existing
+    | map(. + {_key: "\(.bookingDate[:10])|\(.amount * 1000 | round)"})
+    | group_by(._key)
+    | map(.[($existing[.[0]._key] // 0):] | .[])
+    | map(del(._key))
+  '
+}
+
 # ── sync ─────────────────────────────────────────────────────
 
 cmd_sync() {
@@ -506,11 +544,13 @@ cmd_sync() {
 
   local dry_run=false
   local filter_account=""
+  local include_pending="$INCLUDE_PENDING"
 
   # Parse flags
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry_run=true; shift ;;
+      --include-pending) include_pending=true; shift ;;
       --account) [ -z "${2:-}" ] && die "--account requires a name"; filter_account="$2"; shift 2 ;;
       *) die "Unknown flag: $1" ;;
     esac
@@ -596,8 +636,8 @@ cmd_sync() {
     fi
 
     # Filter: only booked transactions not yet assigned the sync category
-    local filtered
-    filtered=$(echo "$transactions_json" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
+    local booked
+    booked=$(echo "$transactions_json" | jq --arg cat_uuid "$SYNC_CATEGORY_UUID" '
       (.transactions // .)
       | if type == "array" then . else [.] end
       | map(select(
@@ -606,8 +646,17 @@ cmd_sync() {
       ))
     ')
 
-    local tx_count
+    local pending="[]"
+    if [ "$include_pending" = true ] \
+      && ! pending=$(new_pending_transactions "$transactions_json" "$ynab_account_id" "$start_date"); then
+      echo "$(red "Error:") Could not fetch YNAB transactions, skipping pending transactions."
+      pending="[]"
+    fi
+
+    local filtered tx_count pending_count
+    filtered=$(jq -n --argjson b "$booked" --argjson p "$pending" '$b + $p')
     tx_count=$(echo "$filtered" | jq 'length')
+    pending_count=$(echo "$pending" | jq 'length')
 
     if [ "$tx_count" -eq 0 ]; then
       echo "$(green "✓") No new transactions."
@@ -615,14 +664,21 @@ cmd_sync() {
       continue
     fi
 
-    echo "$tx_count new transaction(s) found."
+    if [ "$pending_count" -gt 0 ]; then
+      echo "$tx_count new transaction(s) found ($pending_count pending)."
+    else
+      echo "$tx_count new transaction(s) found."
+    fi
 
     if [ "$dry_run" = true ]; then
       echo ""
       printf "  $(dim "%-12s %-10s %-28s %s")\n" "DATE" "AMOUNT" "PAYEE" "MEMO"
       printf "  $(dim "%-12s %-10s %-28s %s")\n" "----------" "----------" "----------------------------" "----------------------------"
-      echo "$filtered" | jq -r '.[] | "\(.bookingDate[:10] // .bookingDate)\t\(.amount * 100 | round / 100)\t\(.name // "Unknown")\t\(.purpose // "")"' | while IFS=$'\t' read -r date amount payee memo; do
-        env LC_NUMERIC=C printf "  %-12s %-10.2f %-28s %s\n" "$date" "$amount" "${payee:0:28}" "${memo:0:40}"
+      # booked comes first: IFS collapses empty fields (e.g. no memo) in the middle
+      echo "$filtered" | jq -r '.[] | "\(.booked)\t\(.bookingDate[:10] // .bookingDate)\t\(.amount * 100 | round / 100)\t\(.name // "Unknown")\t\(.purpose // "")"' | while IFS=$'\t' read -r is_booked date amount payee memo; do
+        local marker=""
+        [ "$is_booked" = true ] || marker=" $(dim "[pending]")"
+        env LC_NUMERIC=C printf "  %-12s %-10.2f %-28s %s%s\n" "$date" "$amount" "${payee:0:28}" "${memo:0:40}" "$marker"
       done
       echo ""
       total_skipped=$((total_skipped + tx_count))
@@ -637,10 +693,14 @@ cmd_sync() {
         date: (.bookingDate[:10] // .bookingDate),
         amount: ((.amount * 1000) | round),
         payee_name: (.name // "Unknown"),
-        memo: (.purpose // ""),
+        memo: (.purpose // "")
+      } + if .booked then {
         cleared: "cleared",
         import_id: ("tx_" + (.id | tostring))
-      }]
+      } else {
+        # No import_id, so YNAB matches the booked version to it later
+        cleared: "uncleared"
+      } end]
     }')
 
     # POST to YNAB
@@ -659,9 +719,9 @@ cmd_sync() {
     echo "$(green "✓") $created created, $duplicates duplicates skipped."
     total_synced=$((total_synced + created))
 
-    # Categorize synced transactions in MoneyMoney
+    # Categorize synced booked transactions in MoneyMoney (pending ones are deduped via YNAB)
     local tx_ids
-    tx_ids=$(echo "$filtered" | jq -r '.[].id')
+    tx_ids=$(echo "$booked" | jq -r '.[].id')
     local labeled=0
 
     for tx_id in $tx_ids; do
@@ -791,6 +851,7 @@ $(bold "Commands:")
 $(bold "Sync Options:")
   --dry-run         Show what would be synced without sending
   --account <name>  Sync only the named account
+  --include-pending Also sync pending transactions (as uncleared)
 
 $(bold "Examples:")
   flusso setup                  # First-time configuration
@@ -799,6 +860,7 @@ $(bold "Examples:")
   flusso sync                   # Sync all accounts
   flusso sync --dry-run         # Preview without syncing
   flusso sync --account "Name"  # Sync one account
+  flusso sync --include-pending # Include pending transactions
 
 $(bold "Configuration:")
   Config: ~/.flusso/config.json
