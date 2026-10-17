@@ -172,6 +172,22 @@ mm_mark_synced() {
   echo "$marked"
 }
 
+# Export the transactions of a MoneyMoney Account since START_DATE and classify
+# them by sync state into CLASSIFIED_TRANSACTIONS ({synced, unsynced, pending}).
+# Stops the run on invalid input, so call it directly, not in $(...).
+# If the export fails or can't be parsed, returns MM_EXPORT_FAILED or
+# MM_PARSE_FAILED and sets EXPORT_PROBLEM to the reason.
+export_classified_transactions() {
+  local account="$1" start_date="$2" transactions rc=0 errfile="$FLUSSO_TMP/export.err"
+  CLASSIFIED_TRANSACTIONS="" EXPORT_PROBLEM=""
+  transactions=$(mm_export_transactions "$account" "$start_date" 2>"$errfile") || rc=$?
+  case "$rc" in
+    0) CLASSIFIED_TRANSACTIONS=$(echo "$transactions" | mm_classify_transactions "$SYNC_CATEGORY_UUID") ;;
+    "$MM_INVALID_INPUT") die "$(cat "$errfile")" ;;
+    *) EXPORT_PROBLEM=$(cat "$errfile"); return "$rc" ;;
+  esac
+}
+
 # ── Config ───────────────────────────────────────────────────
 
 load_config() {
@@ -738,28 +754,26 @@ cmd_sync() {
       continue
     fi
 
-    local transactions_json export_rc=0 export_err="$FLUSSO_TMP/export.err"
-    transactions_json=$(mm_export_transactions "$mm_acct" "$start_date" 2>"$export_err") || export_rc=$?
+    local export_rc=0
+    export_classified_transactions "$mm_acct" "$start_date" || export_rc=$?
     case "$export_rc" in
       0) ;;
-      "$MM_INVALID_INPUT") die "$(cat "$export_err")" ;;
       "$MM_EXPORT_FAILED")
         echo "$(red "Error:") Could not export from MoneyMoney."
         echo "$(dim "Make sure MoneyMoney is running and has granted automation access.")"
-        echo "$(dim "$(cat "$export_err")")"
+        echo "$(dim "$EXPORT_PROBLEM")"
         echo ""
         continue
         ;;
       *)
         echo "$(red "Error:") Could not parse plist data."
-        echo "$(dim "$(cat "$export_err")")"
+        echo "$(dim "$EXPORT_PROBLEM")"
         echo ""
         continue
         ;;
     esac
 
-    local classified unsynced
-    classified=$(echo "$transactions_json" | mm_classify_transactions "$SYNC_CATEGORY_UUID")
+    local classified="$CLASSIFIED_TRANSACTIONS" unsynced
     unsynced=$(echo "$classified" | jq '.unsynced')
 
     local new_pending="[]"
@@ -893,14 +907,11 @@ cmd_status() {
     fi
 
     # Count synced transactions by checking the Sync Category in MoneyMoney
-    local synced_count=0 unsynced_count=0 transactions_json export_rc=0 export_err="$FLUSSO_TMP/export.err"
-    transactions_json=$(mm_export_transactions "$mm_acct" "$start_date" 2>"$export_err") || export_rc=$?
-    [ "$export_rc" -eq "$MM_INVALID_INPUT" ] && die "$(cat "$export_err")"
-    if [ "$export_rc" -eq 0 ]; then
-      local classified
-      classified=$(echo "$transactions_json" | mm_classify_transactions "$SYNC_CATEGORY_UUID")
-      synced_count=$(echo "$classified" | jq '.synced | length')
-      unsynced_count=$(echo "$classified" | jq '.unsynced | length')
+    # A failed export shows as zero counts
+    local synced_count=0 unsynced_count=0
+    if export_classified_transactions "$mm_acct" "$start_date"; then
+      synced_count=$(echo "$CLASSIFIED_TRANSACTIONS" | jq '.synced | length')
+      unsynced_count=$(echo "$CLASSIFIED_TRANSACTIONS" | jq '.unsynced | length')
     fi
 
     printf "  %-25s %s synced, %s unsynced  %s\n" \
