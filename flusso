@@ -6,8 +6,9 @@ set -euo pipefail
 
 VERSION="0.2.0"
 
-# Clean up temp files on exit
-trap 'rm -f /tmp/flusso_*.tmp 2>/dev/null' EXIT
+# Temp files live in a directory of this run only, removed on exit
+FLUSSO_TMP=$(mktemp -d "${TMPDIR:-/tmp}/flusso.XXXXXX")
+trap 'rm -rf "$FLUSSO_TMP"' EXIT
 
 FLUSSO_DIR="$HOME/.flusso"
 CONFIG_FILE="$FLUSSO_DIR/config.json"
@@ -105,7 +106,7 @@ ynab_post() {
   local path="$1" body="$2"
   # Body via temp file to avoid ARG_MAX and process list exposure
   local tmpfile
-  tmpfile=$(mktemp /tmp/flusso_XXXXXX.tmp)
+  tmpfile=$(mktemp "$FLUSSO_TMP/body.XXXXXX")
   printf '%s' "$body" > "$tmpfile"
   curl -sf -X POST "$YNAB_BASE$path" \
     -H "Authorization: Bearer $API_TOKEN" \

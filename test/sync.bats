@@ -227,3 +227,31 @@ load test_helper
   [[ "$output" == *"Balance up to date."* ]] || false
   [ "$(posted_transactions)" = "[]" ]
 }
+
+@test "sync leaves temp files of other flusso runs alone" {
+  write_config
+  mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" "Groceries" | mm_has_transactions
+  ynab_accepts_transactions 1
+  # Stands in for the YNAB request body of a concurrent run
+  local other="/tmp/flusso_bats$$.tmp"
+  touch "$other"
+
+  run "$FLUSSO" sync
+
+  local survived=false
+  [ -f "$other" ] && survived=true
+  rm -f "$other"
+  [ "$status" -eq 0 ]
+  [ "$survived" = true ]
+}
+
+@test "sync removes its own temp files" {
+  write_config
+  mm_tx 101 2026-04-03 -42.5 true "" "Supermarket GmbH" "Groceries" | mm_has_transactions
+  ynab_accepts_transactions 1
+
+  run "$FLUSSO" sync
+
+  [ "$status" -eq 0 ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
